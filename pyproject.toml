@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sql-throughput-challenge"
+version = "0.1.0"
+description = "Benchmarking suite comparing SQL read strategies (sync, async, pooling, multiprocessing) against PostgreSQL."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+license = { text = "MIT" }
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "psycopg[binary,pool]>=3.1",
+  "asyncpg>=0.29",
+  "SQLAlchemy>=2.0",
+  "pandas>=2.1",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=4.1",
+  "ruff>=0.4",
+  "mypy>=1.8",
+  "types-psutil",
+  "types-python-dateutil",
+]
+
+[project.scripts]
+sql-throughput-challenge = "src.main:app"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+lint.select = ["E", "F", "I", "B", "UP", "N", "PL", "RUF"]
+lint.ignore = ["E501"]
+
+[tool.pytest.ini_options]
+addopts = "-q --maxfail=1"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
