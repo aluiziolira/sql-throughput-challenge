@@ -4,6 +4,7 @@ PYTHON := python
 
 ENV_FILE ?= .env
 COMPOSE := docker-compose --env-file $(ENV_FILE)
+ROWS ?= 100000
 
 .PHONY: help
 help:
@@ -36,11 +37,11 @@ logs:
 
 .PHONY: seed
 seed:
-	$(PYTHON) scripts/generate_data.py
+	$(PYTHON) scripts/generate_data.py --rows $(ROWS)
 
 .PHONY: benchmark
 benchmark:
-	$(PYTHON) -m src.main run --strategies all
+	$(PYTHON) -m src.main run --strategy all --rows $(ROWS)
 
 .PHONY: test
 test:
