@@ -1,0 +1,163 @@
+name: CI
+
+on:
+    push:
+        branches: [main, master, develop]
+    pull_request:
+        branches: [main, master, develop]
+    workflow_dispatch:
+
+jobs:
+    test:
+        name: Test Suite (Python ${{ matrix.python-version }})
+        runs-on: ubuntu-latest
+
+        strategy:
+            matrix:
+                python-version: ["3.10", "3.11", "3.12"]
+
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_DB: throughput_challenge
+                    POSTGRES_USER: postgres
+                    POSTGRES_PASSWORD: postgres
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+                  cache: "pip"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -e ".[dev]"
+
+            - name: Run code quality checks
+              run: |
+                  ruff check src tests scripts
+                  ruff format --check src tests scripts
+                  mypy src --ignore-missing-imports
+
+            - name: Initialize database schema
+              env:
+                  PGPASSWORD: postgres
+              run: |
+                  until pg_isready -h localhost -p 5432 -U postgres; do
+                    echo "Waiting for postgres..."
+                    sleep 2
+                  done
+                  psql -h localhost -U postgres -d throughput_challenge -f db/init.sql
+
+            - name: Seed test data
+              env:
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+              run: |
+                  python scripts/generate_data.py --rows 1000 --batch-size 500
+
+            - name: Run all tests with coverage
+              env:
+                  RUN_INTEGRATION_TESTS: "1"
+                  TEST_DB_DSN: "postgresql://postgres:postgres@localhost:5432/throughput_challenge"
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+              run: |
+                  pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term
+
+            - name: Upload coverage to Codecov
+              uses: codecov/codecov-action@v4
+              with:
+                  files: ./coverage.xml
+                  fail_ci_if_error: false
+
+    smoke-benchmark:
+        name: Smoke Benchmark (Quick Run)
+        runs-on: ubuntu-latest
+        if: github.event_name == 'pull_request'
+
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_DB: throughput_challenge
+                    POSTGRES_USER: postgres
+                    POSTGRES_PASSWORD: postgres
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python 3.11
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+                  cache: "pip"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -e ".[dev]"
+
+            - name: Initialize database schema
+              env:
+                  PGPASSWORD: postgres
+              run: |
+                  until pg_isready -h localhost -p 5432 -U postgres; do
+                    echo "Waiting for postgres..."
+                    sleep 2
+                  done
+                  psql -h localhost -U postgres -d throughput_challenge -f db/init.sql
+
+            - name: Seed smoke test data
+              env:
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+              run: |
+                  python scripts/generate_data.py --rows 5000 --batch-size 1000
+
+            - name: Run smoke benchmark (naive only)
+              env:
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+              run: |
+                  python -m src.main run --strategy naive --rows 5000
+
+            - name: Upload benchmark results
+              uses: actions/upload-artifact@v4
+              with:
+                  name: smoke-benchmark-results
+                  path: results/latest.json
+                  retention-days: 7

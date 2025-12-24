@@ -1,0 +1,164 @@
+# GitHub Actions Workflow for Standardized Benchmark Runs
+#
+# Triggers:
+#   - Manual dispatch with configurable parameters
+#   - Release tags for official benchmark results
+
+name: Standardized Benchmark
+
+on:
+    workflow_dispatch:
+        inputs:
+            rows:
+                description: "Number of rows to benchmark"
+                required: true
+                default: "100000"
+                type: choice
+                options:
+                    - "10000"
+                    - "100000"
+                    - "500000"
+                    - "1000000"
+            strategy:
+                description: "Strategy to benchmark"
+                required: true
+                default: "all"
+                type: choice
+                options:
+                    - "all"
+                    - "naive"
+                    - "cursor_pagination"
+                    - "pooled_sync"
+                    - "multiprocessing"
+                    - "async_stream"
+            runs:
+                description: "Number of runs per strategy"
+                required: true
+                default: "3"
+                type: choice
+                options:
+                    - "1"
+                    - "3"
+                    - "5"
+            warmup:
+                description: "Enable warmup run"
+                required: true
+                default: true
+                type: boolean
+
+    push:
+        tags:
+            - "v*"
+
+concurrency:
+    group: benchmark-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    PYTHON_VERSION: "3.11"
+
+jobs:
+    benchmark:
+        name: Run Benchmark
+        runs-on: ubuntu-22.04
+        timeout-minutes: 60
+
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_DB: throughput_challenge
+                    POSTGRES_USER: postgres
+                    POSTGRES_PASSWORD: postgres
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+                    --cpus 2
+                    --memory 2g
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python ${{ env.PYTHON_VERSION }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ env.PYTHON_VERSION }}
+                  cache: "pip"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -e ".[dev]"
+
+            - name: Initialize database schema
+              env:
+                  PGPASSWORD: postgres
+              run: |
+                  until pg_isready -h localhost -p 5432 -U postgres; do sleep 2; done
+                  psql -h localhost -U postgres -d throughput_challenge -f db/init.sql
+
+            - name: Seed benchmark data
+              env:
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+              run: |
+                  ROWS="${{ inputs.rows || '100000' }}"
+                  python scripts/generate_data.py --rows $ROWS
+
+            - name: Run benchmark
+              env:
+                  DB_HOST: localhost
+                  DB_PORT: 5432
+                  DB_USER: postgres
+                  DB_PASSWORD: postgres
+                  DB_NAME: throughput_challenge
+                  BENCHMARK_CONCURRENCY: "2"
+                  PYTHONHASHSEED: "42"
+              run: |
+                  ROWS="${{ inputs.rows || '100000' }}"
+                  STRATEGY="${{ inputs.strategy || 'all' }}"
+                  RUNS="${{ inputs.runs || '3' }}"
+                  WARMUP="${{ inputs.warmup || 'true' }}"
+
+                  WARMUP_FLAG=""
+                  if [ "$WARMUP" == "true" ]; then
+                    WARMUP_FLAG="--warmup"
+                  fi
+
+                  python -m src.main run \
+                    --strategy $STRATEGY \
+                    --rows $ROWS \
+                    --runs $RUNS \
+                    $WARMUP_FLAG
+
+            - name: Generate summary
+              if: always()
+              run: |
+                  echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Rows**: ${{ inputs.rows || '100000' }}" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Strategy**: ${{ inputs.strategy || 'all' }}" >> $GITHUB_STEP_SUMMARY
+                  echo "- **Runs**: ${{ inputs.runs || '3' }}" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+
+                  if [ -f results/latest.json ]; then
+                    echo '```json' >> $GITHUB_STEP_SUMMARY
+                    cat results/latest.json | python -m json.tool >> $GITHUB_STEP_SUMMARY
+                    echo '```' >> $GITHUB_STEP_SUMMARY
+                  fi
+
+            - name: Upload results
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: benchmark-results-${{ github.run_id }}
+                  path: results/
+                  retention-days: 30
