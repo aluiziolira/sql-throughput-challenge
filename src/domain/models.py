@@ -5,6 +5,7 @@ Defines a simple record schema aligned with `db/init.sql`. This model can be
 used for validation, serialization, and type hints across strategies and the
 orchestrator.
 """
+
 from __future__ import annotations
 
 from datetime import datetime

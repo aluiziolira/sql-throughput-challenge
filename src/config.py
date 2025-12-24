@@ -5,6 +5,7 @@ Uses Pydantic Settings to load environment variables for database connections,
 logging, and benchmark defaults. This is a minimal stub to be expanded with
 additional fields as the project evolves.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache

@@ -35,9 +35,7 @@ def _build_dsn(dsn_override: Optional[str]) -> str:
     )
 
 
-def _generate_rows_csv(
-    csv_path: Path, rows: int, batch_size: int, seed: int
-) -> None:
+def _generate_rows_csv(csv_path: Path, rows: int, batch_size: int, seed: int) -> None:
     rng = random.Random(seed)
     categories = ["alpha", "beta", "gamma", "delta"]
     now = datetime.now(timezone.utc).isoformat()
@@ -150,7 +148,9 @@ def main(
     typer.echo(f"Generating {rows:,} rows -> {csv_path} (batch={batch_size}, seed={seed})")
     _generate_rows_csv(csv_path, rows=rows, batch_size=batch_size, seed=seed)
     gen_duration = time.perf_counter() - start
-    typer.echo(f"CSV generation completed in {gen_duration:.2f}s ({rows/gen_duration:,.0f} rows/s)")
+    typer.echo(
+        f"CSV generation completed in {gen_duration:.2f}s ({rows / gen_duration:,.0f} rows/s)"
+    )
 
     if no_load:
         typer.echo("Skipping load (no-load flag set).")
@@ -165,7 +165,7 @@ def main(
     total_duration = time.perf_counter() - start
     typer.echo(
         f"Load completed in {load_duration:.2f}s. Total time {total_duration:.2f}s "
-        f"({rows/total_duration:,.0f} rows/s overall)."
+        f"({rows / total_duration:,.0f} rows/s overall)."
     )
 
 

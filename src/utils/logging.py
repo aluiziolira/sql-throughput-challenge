@@ -13,6 +13,7 @@ Usage:
     log = get_logger(__name__)
     log.info("message", extra={"rows": 1000})
 """
+
 from __future__ import annotations
 
 import json
