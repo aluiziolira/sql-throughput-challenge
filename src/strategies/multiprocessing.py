@@ -8,10 +8,10 @@ Intent:
 - The strategy should split work into ranges/batches and fan out to worker
   processes that execute database reads independently.
 """
+
 from __future__ import annotations
 
 import multiprocessing as mp
-import time
 from dataclasses import dataclass
 from functools import partial
 from typing import List, Optional, Sequence
@@ -35,7 +35,7 @@ def _fetch_range(dsn: str, work: WorkItem) -> int:
     NOTE: Using a simple range-based partitioning; in production you might prefer
     OFFSET/LIMIT or keyset pagination depending on distribution and indexes.
     """
-    sql = "SELECT id FROM public.records WHERE id BETWEEN %s AND %s;"
+    sql = "SELECT * FROM public.records WHERE id BETWEEN %s AND %s;"
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(sql, (work.start_id, work.end_id))
@@ -76,6 +76,11 @@ class MultiprocessingStrategy(BenchmarkStrategy):
     def execute(self, limit: int) -> StrategyResult:
         """
         Execute the multiprocessing fan-out and return basic metrics.
+
+        NOTE: Duration timing is handled by the orchestrator's profiler to correctly
+        measure wall-clock time including worker process startup/shutdown. The main
+        process only coordinates work distribution and would not capture actual
+        worker execution time if measured here.
         """
         # Build DSN once; workers get a string to connect independently.
         if self._dsn_override:
@@ -88,7 +93,6 @@ class MultiprocessingStrategy(BenchmarkStrategy):
             )
 
         work_items: Sequence[WorkItem] = self._make_work_items(limit)
-        start_ts = time.perf_counter()
 
         rows_read = 0
         worker = partial(_fetch_range, dsn)
@@ -96,13 +100,9 @@ class MultiprocessingStrategy(BenchmarkStrategy):
             for count in pool.imap_unordered(worker, work_items):
                 rows_read += count
 
-        duration = time.perf_counter() - start_ts
-        throughput = rows_read / duration if duration > 0 else 0.0
-
+        # Let orchestrator measure duration correctly via profiler
         return StrategyResult(
             rows=rows_read,
-            duration_seconds=duration,
-            throughput_rows_per_sec=throughput,
             peak_rss_bytes=None,  # Not measured yet
             notes=f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}",
         )
