@@ -33,29 +33,29 @@ class PooledSyncStrategy(BenchmarkStrategy):
         self.pool_min_size = pool_min_size
         self.pool_max_size = pool_max_size
         self._dsn_override = dsn_override
-        self._pool: ConnectionPool | None = None
+        self._pool_instance: ConnectionPool | None = None
 
-    def _pool(self) -> ConnectionPool:
-        if self._pool is not None:
-            return self._pool
+    def _get_pool(self) -> ConnectionPool:
+        if self._pool_instance is not None:
+            return self._pool_instance
         if self._dsn_override:
-            self._pool = ConnectionPool(
+            self._pool_instance = ConnectionPool(
                 conninfo=self._dsn_override,
                 min_size=self.pool_min_size,
                 max_size=self.pool_max_size,
             )
         else:
-            self._pool = get_sync_pool(
+            self._pool_instance = get_sync_pool(
                 min_size=self.pool_min_size, max_size=self.pool_max_size
             )
-        return self._pool
+        return self._pool_instance
 
     def execute(self, limit: int) -> StrategyResult:
         sql = "SELECT * FROM public.records ORDER BY id LIMIT %s;"
         rows_fetched = 0
         start = time.perf_counter()
 
-        pool = self._pool()
+        pool = self._get_pool()
         with pool.connection() as conn:
             # Explicitly use named cursor to avoid client-side caching of full result.
             with conn.cursor(name="pooled_sync_cursor") as cur:
