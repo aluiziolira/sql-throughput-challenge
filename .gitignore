@@ -7,8 +7,10 @@ __pycache__/
 .venv/
 venv/
 .env
-.env.*
 .envrc
+
+# Keep .env.example tracked
+!.env.example
 
 # Packaging / build
 build/
