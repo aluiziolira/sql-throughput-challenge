@@ -1,27 +1,47 @@
 SHELL := /bin/sh
-PROJECT_NAME := sql-throughput-challenge
-PYTHON := python
 
-ENV_FILE ?= .env
-COMPOSE := docker-compose --env-file $(ENV_FILE)
+COMPOSE := docker-compose
+COMPOSE_BENCHMARK := docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml
+
 ROWS ?= 100000
+RUNS ?= 1
+STRATEGY ?= all
 
 .PHONY: help
 help:
-	@echo "Available targets:"
-	@echo "  setup        Install dependencies"
-	@echo "  up           Start docker services (Postgres)"
-	@echo "  down         Stop docker services"
-	@echo "  logs         Tail docker logs"
-	@echo "  seed         Generate and load data into Postgres"
-	@echo "  benchmark    Run benchmarks (all strategies via CLI)"
-	@echo "  test         Run tests (unit + integration)"
+	@echo "SQL Throughput Challenge - Makefile"
+	@echo ""
+	@echo "Primary Workflows:"
+	@echo "  benchmark        Run containerized benchmark (recommended)"
+	@echo "  up               Start PostgreSQL"
+	@echo "  down             Stop PostgreSQL"
+	@echo "  clean            Remove containers and volumes"
+	@echo ""
+	@echo "Parameters:"
+	@echo "  ROWS=N           Number of rows (default: 100000)"
+	@echo "  RUNS=N           Number of runs (default: 1)"
+	@echo "  STRATEGY=name    Strategy to run (default: all)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make benchmark ROWS=100000"
+	@echo "  make benchmark ROWS=500000 RUNS=3 STRATEGY=async_stream"
 
-.PHONY: setup
-setup:
-	@echo "Installing dependencies via pip..."
-	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -r requirements.txt || true
+# =============================================================================
+# Benchmarking (Containerized)
+# =============================================================================
+
+.PHONY: benchmark
+benchmark:
+	$(COMPOSE_BENCHMARK) build benchmark
+	$(COMPOSE_BENCHMARK) up -d postgres
+	@until $(COMPOSE_BENCHMARK) exec -T postgres pg_isready -U postgres -d throughput_challenge 2>/dev/null; do sleep 1; done
+	$(COMPOSE_BENCHMARK) run --rm --entrypoint python benchmark scripts/generate_data.py --rows $(ROWS)
+	$(COMPOSE_BENCHMARK) run --rm benchmark run --strategy $(STRATEGY) --rows $(ROWS) --runs $(RUNS)
+	$(COMPOSE_BENCHMARK) down
+
+# =============================================================================
+# Docker Management
+# =============================================================================
 
 .PHONY: up
 up:
@@ -30,19 +50,11 @@ up:
 .PHONY: down
 down:
 	$(COMPOSE) down
+	-$(COMPOSE_BENCHMARK) down 2>/dev/null
 
-.PHONY: logs
-logs:
-	$(COMPOSE) logs -f
-
-.PHONY: seed
-seed:
-	$(PYTHON) scripts/generate_data.py --rows $(ROWS)
-
-.PHONY: benchmark
-benchmark:
-	$(PYTHON) -m src.main run --strategy all --rows $(ROWS)
-
-.PHONY: test
-test:
-	$(PYTHON) -m pytest -q
+.PHONY: clean
+clean:
+	$(COMPOSE) down --volumes --remove-orphans
+	-$(COMPOSE_BENCHMARK) down --volumes --remove-orphans 2>/dev/null
+	-docker rmi sql-benchmark-runner:latest 2>/dev/null
+	rm -rf results/*.json __pycache__ .pytest_cache .mypy_cache .ruff_cache

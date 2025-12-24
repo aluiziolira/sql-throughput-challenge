@@ -1,0 +1,51 @@
+# Docker Compose override for standardized benchmark execution
+#
+# Extends base docker-compose.yml with resource constraints for reproducible results.
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml up -d postgres
+#   docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml run --rm benchmark
+
+services:
+    # Override PostgreSQL with resource constraints and tuned settings
+    postgres:
+        deploy:
+            resources:
+                limits:
+                    cpus: "2.0"
+                    memory: 2G
+        command:
+            - "postgres"
+            - "-c"
+            - "shared_buffers=512MB"
+            - "-c"
+            - "work_mem=64MB"
+            - "-c"
+            - "effective_cache_size=1GB"
+            - "-c"
+            - "jit=off"
+
+    # Benchmark runner with resource constraints
+    benchmark:
+        build:
+            context: .
+            dockerfile: Dockerfile.benchmark
+        image: sql-benchmark-runner:latest
+        depends_on:
+            postgres:
+                condition: service_healthy
+        deploy:
+            resources:
+                limits:
+                    cpus: "4.0"
+                    memory: 4G
+        environment:
+            DB_HOST: postgres
+            DB_PORT: 5432
+            DB_USER: ${DB_USER:-postgres}
+            DB_PASSWORD: ${DB_PASSWORD:-postgres}
+            DB_NAME: ${DB_NAME:-throughput_challenge}
+            BENCHMARK_CONCURRENCY: "4"
+            PYTHONHASHSEED: "42"
+        volumes:
+            - ./results:/app/results

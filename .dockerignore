@@ -1,0 +1,90 @@
+# =============================================================================
+# .dockerignore - Exclude files from Docker build context
+# =============================================================================
+# This significantly reduces build context size and improves build speed.
+# Also prevents sensitive or unnecessary files from being copied into images.
+
+# --- Version Control ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Python Artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Environment & Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- IDE & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Testing & QA ---
+tests/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.nox/
+.tox/
+
+# --- Type Checking & Linting ---
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# --- Documentation ---
+docs/
+*.md
+!README.md
+
+# --- CI/CD ---
+.github/
+
+# --- Project Outputs (generated at runtime) ---
+results/
+data/
+*.csv
+*.json
+*.log
+
+# --- Docker (avoid recursive issues) ---
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# --- Misc ---
+Makefile
+*.bak
+*.tmp
+*.temp

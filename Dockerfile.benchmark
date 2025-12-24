@@ -1,0 +1,134 @@
+# =============================================================================
+# Dockerfile.benchmark - Optimized SQL Throughput Challenge Benchmark Runner
+# =============================================================================
+# Multi-stage build optimized for minimal image size and security.
+#
+# Build:
+#   docker build -f Dockerfile.benchmark -t sql-benchmark-runner .
+#
+# Run:
+#   docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml run --rm benchmark
+#
+# Size optimizations applied:
+#   - Python 3.12 (smaller stdlib, better performance)
+#   - Virtual environment isolation for clean dependency copying
+#   - BuildKit cache mounts for faster rebuilds
+#   - Aggressive cleanup of unnecessary files
+#   - Minimal runtime dependencies
+#   - Non-root user for security
+#
+# Security notes:
+#   - DB_PASSWORD should be passed at runtime via docker-compose secrets,
+#     environment variables (-e), or a secrets manager. Never bake into image.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder - Compile dependencies and install packages
+# -----------------------------------------------------------------------------
+FROM python:3.12-slim-bookworm AS builder
+
+# Install build dependencies in a single layer
+# - build-essential: C compiler for native extensions
+# - libpq-dev: PostgreSQL client headers for psycopg compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Create virtual environment for clean isolation
+ENV VIRTUAL_ENV=/opt/venv
+RUN python -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Upgrade pip and wheel
+RUN pip install --no-cache-dir --upgrade pip wheel
+
+WORKDIR /build
+
+# Copy only dependency specification first (layer caching optimization)
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+# Install dependencies with BuildKit cache mount for pip
+# --no-compile: Skip .pyc generation (done at runtime if needed)
+# --no-cache-dir: Don't store pip's cache in the image
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --no-compile .
+
+# Cleanup of virtual environment - preserve installed packages
+RUN set -ex && \
+    # Remove bytecode and cache files
+    find $VIRTUAL_ENV -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find $VIRTUAL_ENV -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete && \
+    # Remove test directories from packages
+    find $VIRTUAL_ENV -type d \( -name "tests" -o -name "test" -o -name "testing" \) -exec rm -rf {} + 2>/dev/null || true && \
+    # Remove documentation and examples
+    find $VIRTUAL_ENV -type d \( -name "docs" -o -name "doc" -o -name "examples" -o -name "example" \) -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf $VIRTUAL_ENV/share/doc/* $VIRTUAL_ENV/share/man/* 2>/dev/null || true && \
+    # Remove unnecessary metadata files
+    find $VIRTUAL_ENV -type f -name "RECORD" -delete && \
+    find $VIRTUAL_ENV -type f -name "INSTALLER" -delete && \
+    find $VIRTUAL_ENV -type f -name "WHEEL" -delete && \
+    # Strip debug symbols from shared libraries
+    find $VIRTUAL_ENV -type f -name "*.so" -exec strip --strip-unneeded {} \; 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime - Minimal production image
+# -----------------------------------------------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+# Labels for image metadata (OCI standard)
+LABEL org.opencontainers.image.title="SQL Benchmark Runner" \
+      org.opencontainers.image.description="Benchmarking suite for SQL read strategies" \
+      org.opencontainers.image.source="https://github.com/aluizio/sql-throughput-challenge" \
+      org.opencontainers.image.licenses="MIT"
+
+# Install only runtime dependencies and cleanup in single layer
+# - libpq5: PostgreSQL client library (runtime only, no headers)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && apt-get clean
+
+# Create non-root user for security (principle of least privilege)
+RUN groupadd --gid 1000 benchmark && \
+    useradd --uid 1000 --gid benchmark --shell /sbin/nologin --no-create-home benchmark
+
+# Copy virtual environment from builder
+ENV VIRTUAL_ENV=/opt/venv
+COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+WORKDIR /app
+
+# Copy only essential application files
+COPY --chown=benchmark:benchmark src/ ./src/
+COPY --chown=benchmark:benchmark scripts/ ./scripts/
+
+# Create results directory with correct ownership
+RUN mkdir -p /app/results && chown -R benchmark:benchmark /app
+
+# Switch to non-root user
+USER benchmark
+
+# Python optimizations for containerized environments
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=42 \
+    PYTHONFAULTHANDLER=1 \
+    PYTHONPATH=/app
+
+# Database connection defaults (DB_PASSWORD should be provided at runtime)
+# SECURITY: Never hardcode passwords in Dockerfiles - use secrets or env vars at runtime
+ENV DB_HOST=postgres \
+    DB_PORT=5432 \
+    DB_USER=postgres \
+    DB_NAME=throughput_challenge
+
+# Health check to verify Python environment is functional
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import src.main" || exit 1
+
+# Default entrypoint runs the benchmark
+ENTRYPOINT ["python", "-m", "src.main"]
+CMD ["run", "--strategy", "all", "--rows", "100000"]
