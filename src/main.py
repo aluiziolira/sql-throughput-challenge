@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from typing import Optional
 
@@ -8,6 +7,7 @@ import typer
 
 from src.config import get_settings
 from src.orchestrator import available_strategies, run_strategies
+from src.reporter import print_results
 from src.utils.logging import configure_logging
 
 app = typer.Typer(help="SQL Throughput Challenge CLI.")
@@ -41,6 +41,16 @@ def run(
         "-r",
         help="Override number of rows to process (default from settings).",
     ),
+    warmup: bool = typer.Option(
+        False,
+        "--warmup",
+        help="Run each strategy once before measurement to warm caches.",
+    ),
+    runs: int = typer.Option(
+        1,
+        "--runs",
+        help="Number of measurement runs per strategy for statistical aggregation.",
+    ),
 ) -> None:
     """
     Run one or all strategies via orchestrator and persist results.
@@ -56,10 +66,17 @@ def run(
     strategy_names = ["all"] if strategy == "all" else [strategy]
     typer.echo(
         f"Running strategy='{strategy}' for rows={total_rows} "
-        f"(batch={settings.benchmark_batch_size}, concurrency={settings.benchmark_concurrency})."
+        f"(batch={settings.benchmark_batch_size}, concurrency={settings.benchmark_concurrency}, "
+        f"warmup={warmup}, runs={runs})."
     )
-    results = run_strategies(strategy_names=strategy_names, limit=total_rows, persist=True)
-    typer.echo(json.dumps(results, indent=2))
+    results = run_strategies(
+        strategy_names=strategy_names,
+        limit=total_rows,
+        persist=True,
+        warmup=warmup,
+        runs=runs,
+    )
+    print_results(results)
 
 
 def main() -> None:
