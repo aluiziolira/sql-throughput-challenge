@@ -1,201 +1,83 @@
-![CI](https://github.com/aluiziolira/sql-throughput-challenge/workflows/CI/badge.svg)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-
 # SQL Throughput Challenge
 
-Benchmarking suite comparing Python strategies for bulk reads from PostgreSQL. Demonstrates connection pooling, async I/O, multiprocessing, and memory-efficient streaming.
+> **A reproducible benchmark lab for PostgreSQL bulk-read architecture in Python.**
 
-## Quick Start
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
+![Type Checked](https://img.shields.io/badge/type--checked-mypy-blue)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white)
+![CI](https://github.com/aluiziolira/sql-throughput-challenge/workflows/CI/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-**Requirements:** Docker and Docker Compose only. No Python setup needed.
+It compares five execution strategies under fixed CPU/RAM constraints and reports throughput, peak memory, and CPU behavior across 100K, 500K, and 1M row workloads.
 
-```bash
-# Run all benchmarks with 100K rows (results displayed automatically)
-make benchmark ROWS=100000
-```
+| Strategy | One-liner |
+| --- | --- |
+| **Naive** | `fetchall()` baseline to expose Python-side memory saturation. |
+| **Cursor Pagination** | Server-side cursor streaming to enforce near-constant client memory. |
+| **Pooled Sync** | `psycopg_pool` checkout model for batched sync reads under connection reuse. |
+| **Async Stream** | `asyncpg` cursor fan-out with bounded concurrency for non-blocking I/O pipelines. |
+| **Multiprocessing** | Multi-process ID-partitioned fan-out to bypass the GIL and scale row decode throughput. |
 
-Results are displayed as a formatted table upon completion. Raw JSON is also saved to `results/latest.json` for programmatic access.
+## Benchmark Proof
 
-## Strategy Comparison
+Benchmarks were executed with 3 runs per strategy (median shown), containerized resource limits, and persisted artifacts in `results/`.
 
-| Strategy | Concurrency | Memory | Best For |
-|----------|-------------|--------|----------|
-| **Naive** | Single-threaded | High (loads all) | Small datasets, simplicity |
-| **Cursor Pagination** | Single-threaded | Low (streaming) | Memory-constrained environments |
-| **Pooled Sync** | Single-threaded | Low (streaming) | Connection reuse |
-| **Multiprocessing** | Multi-process | High (per-process) | CPU-bound, multi-core |
-| **Async Stream** | Async I/O | Low (streaming) | I/O-bound, high concurrency |
+| Strategy | 100K rows/s | 500K rows/s | 1M rows/s | 1M peak RSS (MB) |
+| --- | ---: | ---: | ---: | ---: |
+| **Multiprocessing** | 39,370 | 102,249 | 124,378 | 777 |
+| **Async Stream** | 28,089 | 29,568 | 28,901 | 101 |
+| **Naive** | 25,510 | 24,402 | 23,359 | 3,537 |
+| **Pooled Sync** | 20,450 | 20,713 | 20,576 | 1,644 |
+| **Cursor Pagination** | 21,413 | 20,929 | 19,520 | 126 |
 
-## Key Results
+- **Throughput proof:** Multiprocessing reaches **124,378 rows/s** at 1M rows, about **5.3x** the naive baseline.
+- **Memory proof:** Async Stream holds 1M-row peak memory at **~101 MB**, about **97% lower** than naive (`~3,537 MB`).
+- **Scaling proof:** Naive throughput remains nearly flat from 100K to 1M while memory grows roughly 9x, confirming a memory-bound architecture.
 
-Benchmark results from 500K rows (3 runs, median values):
+### Visual Evidence
 
-| Strategy | Throughput | Peak Memory | Best For |
-|----------|------------|-------------|----------|
-| **Multiprocessing** | ~68,871 rows/s | 93 MB | CPU-bound bulk ETL, maximum throughput |
-| **Async Stream** | ~51,161 rows/s | 85 MB | Memory-constrained I/O, high concurrency |
-| **Naive** | ~41,337 rows/s | 1,796 MB | Small datasets only (memory intensive) |
-| **Pooled Sync** | ~32,387 rows/s | 855 MB | Connection reuse with moderate memory |
-| **Cursor Pagination** | ~31,122 rows/s | 119 MB | Large result streaming, minimal memory |
-
-> **Key Insight:** Multiprocessing achieves 2.2x higher throughput than async streaming and 2.2x faster than single-threaded approaches, while async streaming uses 95% less memory than naive fetching (85 MB vs 1,796 MB), making it ideal for memory-constrained environments.
-
-## Benchmark Visualizations
-
-### Throughput Comparison
-
-#### 100K Rows
 ![Benchmark 100K](docs/images/benchmark-100k.png)
-
-#### 500K Rows
 ![Benchmark 500K](docs/images/benchmark-500k.png)
-
-#### 1M Rows
 ![Benchmark 1M](docs/images/benchmark-1m.png)
 
-## Make Targets
+### Metric Artifact Excerpt
 
-| Target | Description |
-|--------|-------------|
-| `make benchmark` | Run containerized benchmark (all strategies) |
-| `make up` | Start PostgreSQL container |
-| `make down` | Stop PostgreSQL container |
-| `make clean` | Remove containers and volumes |
+```json
+{
+  "limit": 1000000,
+  "strategy": "multiprocessing",
+  "throughput_rows_per_sec": { "median": 124378.11 },
+  "peak_rss_bytes": { "median": 815017984 }
+}
+```
 
-### Customization
+Source: `results/run-20260207T002833Z.json`
 
-Customize benchmark runs with parameters:
+## Problem Statement
+
+In Python backend development, choosing between `sync`, `async`, or `multiprocessing` for bulk-read operations is often driven by "vibe" or trends rather than empirical data. When engineering teams can’t quantify where a strategy fails, the result is:
+
+- **Unpredictable OOM Incidents:** Hidden memory spikes in ETL jobs that crash production containers.
+- **SLA Breaches:** Latency degradation that only appears under specific "workload shapes."
+- **Wasted Cloud Spend:** Over-provisioning resources because the execution bottleneck (CPU vs. I/O) isn't truly understood.
+
+**This project replaces anecdote with evidence.** It provides a standardized framework to profile and justify architectural choices based on measured memory RSS, throughput, and latency across diverse operating envelopes.
+
+
+## Technical Decisions
+
+The strategy portfolio intentionally spans a full decision surface: baseline (`naive`), memory-safe serial stream (`cursor_pagination`), pool-managed sync (`pooled_sync`), event-loop concurrency (`async_stream`), and CPU-parallel fan-out (`multiprocessing`). This was selected to separate bottlenecks rather than mask them. For example, cursor streaming improves consistency and memory predictability by holding a transaction and consuming deterministic batches, but that same choice trades off latency under high demand because work remains serialized on one Python process. In contrast, multiprocessing improves latency and raw throughput by parallelizing decode work across processes, but pays for that gain in higher aggregate RSS and orchestration overhead. The design goal is not to crown a universal winner; it is to map which architecture is dominant for each workload and operational constraint.
+
+The project is deliberately SQL-first instead of adding NoSQL paths because the target problem is relational analytical reads with ordering guarantees and transactional semantics. SQL provides deterministic row selection (`ORDER BY id`, bounded `LIMIT`, transactional cursor scope) that makes cross-run comparisons valid, while equivalent NoSQL scans would introduce different consistency and index trade spaces that dilute the benchmark question. Within SQL, driver choices are similarly intentional: `asyncpg` is used for async streaming due to protocol efficiency, while `psycopg3` + `psycopg_pool` covers synchronous and pooled control paths.
+
+Python/backend best practices are built into execution quality: strict static typing (`mypy` with `disallow_untyped_defs`), validated settings via Pydantic, safe process start mode (`spawn`) for cross-platform isolation, explicit timeout controls (`DB_STATEMENT_TIMEOUT_MS`), run-level failure policies (tolerant vs strict), and profiler-based peak RSS/CPU measurement with background sampling to capture transient spikes.
+
+## Reproduce Evidence
 
 ```bash
-# Run specific strategy
-make benchmark STRATEGY=async_stream
-
-# Run with different dataset sizes
-make benchmark ROWS=500000
-
-# Multiple runs for statistical aggregation
 make benchmark ROWS=100000 RUNS=3
-
-# Combine parameters
-make benchmark ROWS=1000000 RUNS=5 STRATEGY=multiprocessing
+make benchmark ROWS=500000 RUNS=3
+make benchmark ROWS=1000000 RUNS=3
 ```
 
-## Features
-
-- **5 Benchmark Strategies**: Naive, cursor pagination, connection pooling, multiprocessing, async streaming
-- **Comprehensive Profiling**: Wall-clock time, peak RSS, tracemalloc, CPU utilization
-- **Statistical Aggregation**: Multiple runs with median/mean/stddev
-- **Reproducible Environment**: Docker containers with fixed CPU/memory constraints
-- **CI/CD Pipeline**: GitHub Actions for linting, type checking, and testing
-
-## Project Structure
-
-```
-├── src/
-│   ├── strategies/          # Benchmark implementations
-│   │   ├── naive.py
-│   │   ├── cursor_pagination.py
-│   │   ├── pooled_sync.py
-│   │   ├── multiprocessing.py
-│   │   └── async_stream.py
-│   ├── orchestrator.py      # Strategy execution + profiling
-│   ├── reporter.py          # Results formatting
-│   └── utils/profiler.py    # Metrics collection
-├── db/init.sql              # Database schema
-├── scripts/generate_data.py # Data seeding
-├── tests/                   # Unit + integration tests
-└── docs/methodology.md      # Detailed benchmark methodology
-```
-
-## Understanding Results
-
-### Single Run Output
-
-```json
-{
-  "strategy": "async_stream",
-  "rows": 100000,
-  "duration_seconds": 2.34,
-  "throughput_rows_per_sec": 42735.04,
-  "peak_rss_bytes": 52428800,
-  "cpu_percent": 85.3
-}
-```
-
-### Multiple Runs Output (Statistical Aggregation)
-
-```json
-{
-  "strategy": "async_stream",
-  "rows": 100000,
-  "runs": 3,
-  "duration_seconds": {
-    "median": 2.34,
-    "mean": 2.35,
-    "stddev": 0.02
-  },
-  "throughput_rows_per_sec": {
-    "median": 42735.04,
-    "mean": 42553.19,
-    "stddev": 364.31
-  }
-}
-```
-
-### Querying Results (Optional)
-
-For programmatic access, raw JSON is saved to `results/latest.json`. If you have [`jq`](https://jqlang.github.io/jq/) installed:
-
-```bash
-# Single run results
-cat results/latest.json | jq '.results[] | {strategy, throughput: .throughput_rows_per_sec}'
-
-# Aggregated results (multiple runs)
-cat results/latest.json | jq '.results[] | {strategy, throughput: .throughput_rows_per_sec.median}'
-```
-
-## Documentation
-
-- [Benchmark Methodology](docs/methodology.md) — Detailed explanation of metrics, statistical approach, and reproducibility
-
-## Tech Stack
-
-**Core Technologies:**
-- Python 3.11
-- PostgreSQL 16
-- Docker & Docker Compose
-
-**Python Libraries:**
-- `psycopg3` — Synchronous PostgreSQL adapter with connection pooling
-- `asyncpg` — High-performance async PostgreSQL driver
-- `typer` — CLI framework
-- `pydantic` — Configuration management
-- `rich` — Terminal output formatting
-- `psutil` — System resource monitoring
-
-**Development Tools:**
-- `pytest` — Testing framework
-- `ruff` — Linter and formatter
-- `mypy` — Static type checker
-- GitHub Actions — CI/CD pipeline
-
-## CI/CD Pipeline
-
-The project includes comprehensive GitHub Actions workflows:
-
-- **CI Workflow** (`ci.yml`)
-  - Code quality checks (Ruff linting + formatting)
-  - Type checking (MyPy)
-  - Full test suite (unit + integration)
-  - Matrix testing across Python 3.10, 3.11, 3.12
-  - Smoke benchmarks on pull requests
-
-- **Benchmark Workflow** (`benchmark.yml`)
-  - Manual and tag-triggered benchmark runs
-  - Configurable parameters (rows, strategy, runs)
-  - Artifact uploading for result analysis
-
-## License
-
-MIT
+Detailed methodology: [docs/methodology.md](docs/methodology.md)

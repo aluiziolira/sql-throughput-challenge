@@ -1,433 +1,182 @@
-# Benchmark Methodology
+# Benchmark Internals & Methodology
 
-This document describes the methodology, rationale, and best practices for benchmarking PostgreSQL read strategies in the SQL Throughput Challenge.
+This document details the technical design and measurement mechanics of the SQL Throughput Challenge. It functions as a lab manual for developers looking to understand, replicate, or modify the benchmark suite.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Hardware & Environment](#hardware--environment)
-- [Standardized Execution Environment](#standardized-execution-environment)
-- [Benchmark Design](#benchmark-design)
-- [Metrics & Measurement](#metrics--measurement)
-- [Strategy Comparison](#strategy-comparison)
-- [Reproducibility](#reproducibility)
-- [Interpreting Results](#interpreting-results)
-
----
-
-## Executive Summary
-
-**For non-technical stakeholders:**
-
-This project answers: *"What's the fastest way to read large amounts of data from a database in Python?"*
-
-We tested 5 different approaches and found:
-- **Best overall performance:** Multiprocessing (~68,871 rows/s) - distributes work across CPU cores
-- **Best memory efficiency:** Async streaming (85 MB vs 1,796 MB for naive) - uses 95% less memory than basic approach
-- **Simplest option:** Naive fetching (~41,337 rows/s) - fine for small datasets under 10K rows
-
-The results help teams choose the right approach based on their constraints (speed vs. memory vs. code complexity).
-
----
-
-## Overview
-
-The SQL Throughput Challenge benchmarks different Python strategies for reading large datasets from PostgreSQL. The goal is to demonstrate:
-
-1. **Performance characteristics** of various approaches (naive, paginated, pooled, parallel, async)
-2. **Resource utilization** (memory, CPU) under different workloads
-3. **Trade-offs** between throughput, latency, and resource consumption
-4. **Best practices** for database interaction in Python backend systems
-
-### Key Objectives
-
-- **Reproducibility**: All benchmarks should produce consistent results across runs
-- **Fairness**: Each strategy operates on the same dataset with identical database state
-- **Realism**: Test scenarios reflect real-world use cases (ETL, reporting, bulk processing)
-- **Transparency**: All methodology decisions and limitations are documented
-
----
-
-## Hardware & Environment
-
-### Recommended Specifications
-
-For consistent benchmarking results:
-
-- **CPU**: 4+ cores (modern x86_64 or ARM64)
-- **RAM**: 8GB+ (to avoid swapping during benchmarks)
-- **Storage**: SSD recommended (reduces I/O bottlenecks)
-- **OS**: Linux, macOS, or Windows with Docker support
-
-### Software Stack
-
-- **Python**: 3.10+ (type hints, structural pattern matching)
-- **PostgreSQL**: 16.x (latest stable with performance improvements)
-- **psycopg**: 3.1+ (modern sync driver)
-- **asyncpg**: 0.29+ (high-performance async driver)
-
-### Docker Configuration
-
-The `docker-compose.yml` configuration uses:
-- PostgreSQL 16 Alpine (minimal footprint)
-- Default PostgreSQL settings (no tuning for reproducibility)
-- Named volume for data persistence
-- Health checks for readiness detection
-
-**Note**: Default PostgreSQL settings are intentionally used to simulate a "typical" deployment. For production optimization, consider:
-- `shared_buffers` (25% of RAM)
-- `work_mem` (query memory per operation)
-- `effective_cache_size` (OS cache hint)
-- `max_connections` (connection limit)
-
----
-
-## Standardized Execution Environment
-
-For **reproducible benchmark results**, the project provides a containerized benchmark environment with fixed resource constraints via Docker Compose.
-
-### Resource Allocation
-
-| Component   | CPUs | Memory |
-|-------------|------|--------|
-| PostgreSQL  | 2.0  | 2 GB   |
-| Benchmark   | 2.0  | 4 GB   |
-| **Total**   | 4.0  | 6 GB   |
-
-### Running Containerized Benchmarks
-
-```bash
-# Using Make (recommended)
-make benchmark ROWS=100000 RUNS=3
-
-# Or using Docker Compose directly
-docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml up -d postgres
-docker-compose -f docker-compose.yml -f docker-compose.benchmark.yml run --rm benchmark \
-    python -m src.main run --strategy all --rows 100000 --runs 3
-```
-
-The containerized benchmark ensures consistent resource allocation across different host machines, making results comparable and reproducible.
-
----
-
-## Benchmark Design
+## 1. Experiment Design
 
 ### Dataset Characteristics
 
-The synthetic dataset is designed to be:
+The benchmark operates on a synthetic table designed to mimic production reporting workloads. To ensure distinct performance characteristics across strategies, the schema includes mixed data types rather than simple integers.
 
-1. **Deterministic**: Fixed random seed (default: 42) ensures reproducibility
-2. **Representative**: Includes typical data types (timestamps, JSON, numerics, booleans, text)
-3. **Realistic size**: Default 1M rows (~500MB) simulates medium-scale reporting queries
-4. **Indexed**: Primary key (id) + secondary indexes on common filter columns
+- **Scale:** 100K to 1M+ rows (default).
+- **Determinism:** Data generation uses fixed RNG seeds (`seed=42`) ensuring identical datasets across runs.
+- **Complexity:**
+  - `JSONB` payloads (semi-structured data parsing cost).
+  - `TIMESTAMPTZ` (timezone-aware parsing cost).
+  - `NUMERIC` (high-precision decimal handling).
+  - `TEXT` categorical data.
 
-#### Schema
+**Loading Strategy:**
+Data is generated in Python but loaded via PostgreSQL `COPY FROM STDIN` (binary/CSV) rather than individual `INSERT` statements, effectively isolating the **read** benchmark from write performance variability.
 
-```sql
-CREATE TABLE public.records (
-    id            BIGSERIAL PRIMARY KEY,           -- Sequential ID
-    created_at    TIMESTAMPTZ NOT NULL,            -- Timestamp with timezone
-    updated_at    TIMESTAMPTZ NOT NULL,            -- Auto-updated via trigger
-    category      TEXT NOT NULL,                   -- Categorical data (4 values)
-    payload       JSONB NOT NULL,                  -- Semi-structured data
-    amount        NUMERIC(12,2) NOT NULL,          -- Decimal precision
-    is_active     BOOLEAN NOT NULL DEFAULT TRUE,   -- Boolean flag
-    source        TEXT NOT NULL DEFAULT 'generator'-- Origin tracking
-);
+### Limitations
 
-CREATE INDEX idx_records_created_at ON public.records (created_at);
-CREATE INDEX idx_records_category    ON public.records (category);
-CREATE INDEX idx_records_is_active   ON public.records (is_active);
-```
-
-### Data Generation Strategy
-
-Data is generated via `scripts/generate_data.py`:
-
-1. **CSV buffering**: Rows are written to CSV in batches (default: 10,000)
-2. **Bulk loading**: PostgreSQL `COPY` command loads CSV (10-50x faster than INSERTs)
-3. **Consistent payload**: JSON payloads contain realistic nested structures
-
-### Benchmark Scenarios
-
-#### Small (Smoke Tests)
-- **Rows**: 1,000 - 10,000
-- **Purpose**: Quick validation, CI/CD pipelines
-- **Duration**: < 5 seconds per strategy
-
-#### Medium (Development)
-- **Rows**: 100,000
-- **Purpose**: Local development, feature testing
-- **Duration**: 10-30 seconds per strategy
-
-#### Large (Production-like)
-- **Rows**: 1,000,000+
-- **Purpose**: Performance profiling, portfolio demonstration
-- **Duration**: 1-5 minutes per strategy
+- **Localhost Limits:** Network latency is negligible (container-to-container), emphasizing driver/deserialization CPU overhead over network I/O.
+- **Read-Only:** Pure throughput test; does not measure write contention or locking.
+- **Single Table:** No `JOIN` overhead; measures raw row fetching speed.
 
 ---
 
-## Metrics & Measurement
+## 2. Measurement System
 
-### Primary Metrics
+The project uses a custom profiler (`src/utils/profiler.py`) designed to catch transient spikes often missed by simple start/end snapshots.
 
-| Metric | Description | Unit | Collection Method |
-|--------|-------------|------|-------------------|
-| **Duration** | Wall-clock time | seconds | `time.perf_counter()` |
-| **Throughput** | Rows processed per second | rows/s | `rows / duration` |
-| **Peak RSS** | Maximum resident set size | bytes | `psutil` background sampling |
-| **Peak Traced Memory** | Python allocation peak | bytes | `tracemalloc` |
-| **CPU %** | CPU utilization | percent | `psutil.Process.cpu_percent()` |
+### Metrics Captured
 
-### Secondary Metrics
+1. **Wall-Clock Duration:** `time.perf_counter()` (nanosecond precision).
+2. **Peak RSS (OS Memory):**
+    - Measured via a **daemon thread** polling `psutil.Process.memory_info()` every **50ms**.
+    - *Why:* Batch processing creates "sawtooth" memory patterns. Snapshotting at the end often reports the "low" point (after GC), missing the true peak.
+3. **CPU Utilization:** `psutil.cpu_percent()` aggregated across the main process and all child workers (essential for Multiprocessing strategy).
+4. **Allocations (Python):** `tracemalloc` (optional) to track internal Python object overhead.
 
-- **Query count**: Number of database round-trips
-- **Connection pool stats**: Active/idle connections
-- **Network I/O**: Bytes transferred (if applicable)
+### Statistical Aggregation
 
-### Measurement Tools
+Single runs are noisy due to OS scheduling and JIT warmups. We employ:
 
-#### Profiler (`src/utils/profiler.py`)
+- **Median** (primary metric) to filter outliers.
+- **Standard Deviation** to detect stability issues.
+- **Warmup Runs** (optional via `--warmup`) to prime OS page cache and Postgres shared buffers.
 
-The profiler uses:
+### Statistical Caveats
 
-1. **High-resolution timer**: `time.perf_counter()` for nanosecond precision
-2. **Background sampling**: Thread-based RSS sampling at 50ms intervals
-3. **tracemalloc**: Python-level memory allocation tracking
-4. **psutil**: OS-level process metrics
+The default configuration uses **5 runs** per strategy to provide a reasonable balance between statistical confidence and execution time. However, this should be considered a minimum:
 
-```python
-with profile_block("strategy-name") as stats:
-    strategy.execute(limit=1_000_000)
+- **3 runs** provides limited statistical confidence and may not adequately capture variance from OS scheduling, background processes, or transient system load. Results from 3 runs should be treated as preliminary and may vary significantly between executions.
+- **5+ runs** are recommended for publishable numbers or when making performance comparisons between strategies. This provides better outlier detection and more reliable median/standard deviation metrics.
+- For rigorous academic or production benchmarking, consider **10+ runs** to achieve tighter confidence intervals.
 
-print(f"Duration: {stats.duration_seconds:.2f}s")
-print(f"Peak RSS: {stats.peak_rss_bytes / 1024**2:.1f} MB")
-print(f"Throughput: {rows / stats.duration_seconds:,.0f} rows/s")
-```
+When comparing strategies, ensure both use the same number of runs and that `--warmup` is enabled to minimize cold-start effects.
 
-#### Statistical Aggregation
+### Strategy Lifecycle Hygiene
 
-For robust results, run each strategy multiple times (default: `--runs 3`):
+Strategy instances are created per warmup/measurement run and executed by the orchestrator. After each run, the orchestrator performs best-effort cleanup by calling a strategy `close()` method when that method exists.
 
-- **Median**: Robust central tendency (less affected by outliers)
-- **Mean**: Average performance
-- **StdDev**: Consistency indicator (lower = more consistent)
-- **Min/Max**: Range of observed values
+- This keeps resource ownership explicit for strategies that manage pools or other long-lived handles.
+- Cleanup is attempted in a safe `finally` path, so it also runs when strategy execution fails.
+- Strategies that do not own external resources are not required to implement `close()`.
 
----
+### Run-Level Failure Policy
 
-## Strategy Comparison
+Orchestrator execution supports a run-level failure policy via `RunConfig.failure_policy`:
 
-### 1. Naive (Baseline)
+- `tolerant` (default): strategy execution exceptions are captured into the result payload (`error`, plus failure metadata under `extra`) so remaining runs/strategies continue.
+- `strict`: strategy execution exceptions are re-raised immediately (fail-fast), stopping execution at the first measurement failure.
 
-**Description**: Single `SELECT * ... LIMIT N` with `fetchall()`.
-
-**Characteristics**:
-- ✅ Simplest implementation
-- ❌ Loads entire result set into memory
-- ❌ Single connection, no concurrency
-- ❌ Poor memory efficiency
-
-**Use Case**: Small result sets (< 10K rows), simplicity over performance.
-
-**Expected Performance**:
-- Throughput: Moderate (single-threaded)
-- Memory: High (linear with result set size)
+The default remains `tolerant` for backward compatibility with existing CLI and benchmark workflows.
 
 ---
 
-### 2. Cursor Pagination
+## 3. Implementation Specifications
 
-**Description**: Server-side cursor with `fetchmany(batch_size)`.
+This section defines the precise drivers, libraries, and SQL commands used by each strategy. For high-level architectural patterns (like the "Two-Phase Fan-Out"), refer to the [Strategy Mechanics](../README.md#strategy-mechanics) section in the README.
 
-**Characteristics**:
-- ✅ Memory-efficient streaming
-- ✅ Configurable batch size
-- ❌ Single connection
-- ⚠️  Requires transaction to keep cursor alive
+### Naive
 
-**Use Case**: Memory-constrained environments, large result sets.
+- **Mechanism:** `cursor.fetchall()` loading all rows into a single Python list.
+- **Bottleneck:** Memory Pressure. Large datasets trigger OS swapping or OOM kills.
+- **Driver:** `psycopg3`.
 
-**Expected Performance**:
-- Throughput: Moderate (single-threaded)
-- Memory: Low (constant with batch size)
+### Cursor Pagination
 
-**Configuration**:
-```python
-CursorPaginationStrategy(batch_size=10_000)
-```
+- **Mechanism:** Server-side named cursor (`DECLARE ... CURSOR`).
+- **Flow:** Fetches constant `batch_size` (default 10k) chunks.
+- **Constraint:** Requires a long-lived transaction (`state=idle_in_transaction`) to keep the cursor valid.
+- **Bottleneck:** Network round-trips and serialized processing.
 
----
+### Pooled Sync
 
-### 3. Pooled Sync
+- **Mechanism:** Connection pool (`psycopg_pool.ConnectionPool`) checking out connections for short bursts.
+- **Optimization:** Reduces TCP handshake overhead, though less effective for a single long-running bulk read than for many short queries.
 
-**Description**: Connection pool + batched fetching.
+### Multiprocessing
 
-**Characteristics**:
-- ✅ Reusable connections (reduces overhead)
-- ✅ Memory-efficient
-- ⚠️  Pool contention with high concurrency
-- ❌ Still single-threaded execution
+- **Mechanism:** Parallel worker pool using `multiprocessing.get_context("spawn")`.
+- **Partitioning:** ID chunking based on `SELECT id ... ORDER BY id LIMIT N`.
+  - *Why:* Avoids `OFFSET` scans and does not assume contiguous IDs. Each worker fetches `WHERE id = ANY(...)` over its chunk.
+- **Process Model:** Uses `spawn` instead of `fork` for thread safety and cross-platform compatibility (Windows/macOS), keeping interactions isolated.
 
-**Use Case**: Applications with repeated queries, connection overhead reduction.
+### Async Stream
 
-**Expected Performance**:
-- Throughput: Moderate to high (reduced connection overhead)
-- Memory: Low (constant with batch size)
+- **Mechanism:** `asyncpg` connection pool with concurrent cursor fetching.
+- **Driver Choice:** Uses `asyncpg` over `psycopg3` (async mode) due to its native binary protocol implementation.
+- **Flow:**
+  - **Single Concurrency:** Simple asynchronous iteration via `cursor.__aiter__`.
+  - **High Concurrency:** Implements the same **Two-Phase Partitioning** as Multiprocessing (fetch IDs -> fan-out queries) to utilize multiple connections in the event loop.
+  - **Bounded-ID Guardrail:** For large limits, concurrent mode selects IDs in fixed windows (default threshold: `50_000`, window size: `20_000`) and processes each window before selecting the next, reducing avoidable in-memory ID buildup while preserving behavior for small/medium limits.
 
-**Configuration**:
-```python
-PooledSyncStrategy(
-    batch_size=10_000,
-    pool_min_size=2,
-    pool_max_size=10
-)
-```
+### Statement Timeouts
+
+- **Mechanism:** Optional `SET LOCAL statement_timeout = <ms>` per transaction.
+- **Control:** Configure via `DB_STATEMENT_TIMEOUT_MS` (0 disables).
 
 ---
 
-### 4. Multiprocessing
+## 4. Controlled Environment
 
-**Description**: Process pool with ID-range partitioning.
+Reproducibility is enforced via Docker Compose resource limits.
 
-**Characteristics**:
-- ✅ True parallelism (bypasses GIL)
-- ✅ Scalable with CPU cores
-- ❌ Higher memory (per-process overhead)
-- ❌ Process spawn overhead
-- ⚠️  Requires picklable functions
+| Component         | CPU Limit | RAM Limit | Rationale                                             |
+| :---------------- | :-------- | :-------- | :---------------------------------------------------- |
+| **Benchmark App** | 4.0 Cores | 4 GB      | Prevents infinite parallel scaling; limits heap size. |
+| **PostgreSQL**    | 2.0 Cores | 2 GB      | Simulates a constrained DB instance.                  |
 
-**Use Case**: CPU-bound processing, bulk ETL, multi-core servers.
-
-**Expected Performance**:
-- Throughput: High (scales with cores)
-- Memory: High (per-process overhead)
-
-**Configuration**:
-```python
-MultiprocessingStrategy(
-    processes=4,
-    chunk_size=50_000
-)
-```
-
-**Trade-offs**:
-- Optimal `processes`: 80-90% of CPU cores (leave headroom)
-- Optimal `chunk_size`: Balance between overhead and parallelism
+**Database Tuning:**
+The Benchmark container applies modest tuning to the Postgres instance (`shared_buffers=512MB`, `work_mem=64MB`) to simulate a configured production environment rather than a raw default installation. Also explicitly disables JIT (`jit=off`) to avoid overhead on short query streams.
 
 ---
 
-### 5. Async Stream
+## 5. Running & Verifying
 
-**Description**: asyncpg with asynchronous cursor streaming.
-
-**Characteristics**:
-- ✅ Non-blocking I/O
-- ✅ High concurrency potential
-- ✅ Memory-efficient
-- ❌ Requires async-aware code
-- ⚠️  Single event loop (limited by I/O, not CPU)
-
-**Use Case**: I/O-bound workloads, high-concurrency services, modern async stacks.
-
-**Expected Performance**:
-- Throughput: High (for I/O-bound)
-- Memory: Low (streaming)
-
-**Configuration**:
-```python
-AsyncStreamStrategy(batch_size=10_000)
-```
-
----
-
-## Reproducibility
-
-### Controlling Variability
-
-1. **Database state**: Always seed fresh data before benchmarks
-2. **Cache effects**: Run warmup iteration (`--warmup`) or restart Postgres
-3. **Background load**: Minimize other processes during benchmarking
-4. **Network**: Use localhost to eliminate network variability
-5. **Random seed**: Fixed seed (42) for data generation
-
-### Cache Considerations
-
-PostgreSQL caching affects results:
-
-- **Cold cache**: First query after restart (realistic for batch jobs)
-- **Warm cache**: Subsequent queries (data in `shared_buffers`)
-- **Hot cache**: Data in OS page cache
-
-**Recommendation**: For fairness, either:
-- Restart Postgres between strategies (cold cache)
-- Run warmup iteration for all strategies (warm cache)
-
-### Running Reproducible Benchmarks
+To run the full suite under these strict constraints:
 
 ```bash
-# Run containerized benchmark with multiple runs
-make benchmark ROWS=1000000 RUNS=3
+# Full benchmark (all strategies, 100k rows)
+make benchmark ROWS=100000
 
-# View results
-cat results/latest.json | jq '.results[] | {strategy, throughput: .throughput_rows_per_sec}'
+# Targeted debug run
+make benchmark STRATEGY=multiprocessing ROWS=10000 RUNS=1
 ```
 
-Note: The containerized benchmark automatically:
-- Starts PostgreSQL with resource constraints
-- Seeds the database with specified rows
-- Executes all strategies (or specific strategy if `STRATEGY=` is set)
-- Cleans up containers after completion
+Results are dumped to `results/latest.json` containing the raw raw metrics for every run, allowing for external analysis.
 
 ---
 
-## Interpreting Results
+## 6. Benchmark Comparability Assumptions
 
-### Understanding Trade-offs
+When interpreting benchmark results across strategies, the following assumptions ensure fair comparison:
 
-| Priority | Choose Strategy |
-|----------|-----------------|
-| **Simplicity** | Naive |
-| **Memory efficiency** | Cursor Pagination, Async Stream |
-| **Throughput (CPU-bound)** | Multiprocessing |
-| **Throughput (I/O-bound)** | Async Stream |
-| **Connection reuse** | Pooled Sync |
+### Row Count Equivalence
 
-### Red Flags
+All strategies return the **same row count** for a given `limit` parameter. The benchmark validates this by counting rows returned by each strategy and ensuring they match. This guarantees that throughput differences reflect genuine performance variations, not data volume differences.
 
-- **Throughput < 1,000 rows/s**: Check network, indexes, query plan
-- **Memory > 2x dataset size**: Memory leak or inefficient fetching
-- **CPU > 200%** (single strategy): Unexpected parallelism or contention
-- **High stddev (> 20%)**: Inconsistent environment or cache effects
+### Non-Contiguous ID Handling
 
-### Example Analysis
+The **Multiprocessing** strategy uses ID-based chunking rather than range assumptions:
 
-```json
-{
-  "strategy": "multiprocessing",
-  "duration_seconds": {
-    "median": 12.5,
-    "mean": 12.8,
-    "stddev": 0.6
-  },
-  "throughput_rows_per_sec": {
-    "median": 80000,
-    "mean": 78125,
-    "stddev": 3750
-  }
-}
-```
+- It first queries `SELECT id ... ORDER BY id LIMIT N` to get the exact IDs
+- Workers fetch `WHERE id = ANY(...)` over their assigned chunk
+- This approach works correctly even with gaps in the ID sequence (e.g., after deletions)
+- No assumption is made that IDs are contiguous or start at 1
 
-**Interpretation**:
-- Median duration: 12.5s (robust metric)
-- Low stddev: Consistent performance
-- Throughput: 80K rows/s (good for 4-core CPU)
+### Timeout Behavior Impact
 
----
+When `DB_STATEMENT_TIMEOUT_MS` is configured:
 
-## Limitations
+- Each query within a strategy is subject to the timeout
+- Strategies with multiple queries (e.g., Multiprocessing with many chunks) may encounter timeouts on individual chunks while others succeed
+- In `tolerant` mode (default), timeout exceptions are captured in run results (`error` + failure metadata) so remaining runs/strategies continue
+- In `strict` mode, timeout exceptions are re-raised immediately and fail fast
+- For fair comparison, use the same timeout value (or disable timeouts) when comparing strategies
 
-1. **Read-only**: No write benchmark scenarios
-2. **Single table**: No join or aggregation benchmarks
-3. **Localhost only**: No network latency simulation
-4. **Fixed schema**: No variable column width/cardinality tests
+These assumptions ensure that benchmark results reflect genuine architectural differences between strategies rather than data or configuration artifacts.
