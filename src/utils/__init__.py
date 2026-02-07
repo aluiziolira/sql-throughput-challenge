@@ -6,12 +6,11 @@ Keep this package lightweight and free of domain-specific logic.
 """
 
 from src.utils.logging import configure_logging, get_logger
-from src.utils.profiler import ProfileStats, profile_block, profile_function
+from src.utils.profiler import ProfileStats, profile_block
 
 __all__ = [
+    "ProfileStats",
     "configure_logging",
     "get_logger",
-    "ProfileStats",
     "profile_block",
-    "profile_function",
 ]

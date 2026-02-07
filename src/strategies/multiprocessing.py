@@ -1,110 +1,155 @@
 """
-Multiprocessing strategy stub for the SQL Throughput Challenge.
+Multiprocessing strategy for the SQL Throughput Challenge.
 
 Intent:
 - Demonstrate parallel processing of data chunks fetched from Postgres.
-- This stub focuses on structure and type safety; wiring to orchestrator/metrics
-  will come later.
-- The strategy should split work into ranges/batches and fan out to worker
-  processes that execute database reads independently.
+- Split work into ID chunks and fan out to worker processes.
+- Includes error capture, timeout protection, and Windows compatibility.
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Optional, Sequence
 
 import psycopg
 
 from src.config import get_settings
+from src.infrastructure.db_factory import build_dsn
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 
 @dataclass(frozen=True)
 class WorkItem:
-    start_id: int
-    end_id: int
+    ids: list[int]
 
 
-def _fetch_range(dsn: str, work: WorkItem) -> int:
+def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | None]:
     """
-    Worker function: fetch rows within an ID range and return count.
+    Worker function: fetch rows for an explicit list of IDs.
 
-    NOTE: Using a simple range-based partitioning; in production you might prefer
-    OFFSET/LIMIT or keyset pagination depending on distribution and indexes.
+    Returns (row_count, error_message).
+    Uses streaming with server-side cursor to reduce memory.
     """
-    sql = "SELECT * FROM public.records WHERE id BETWEEN %s AND %s;"
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (work.start_id, work.end_id))
-            rows = cur.fetchall()
-            return len(rows)
+    try:
+        if not work.ids:
+            return (0, None)
+
+        sql = "SELECT * FROM public.records WHERE id = ANY(%s) ORDER BY id;"
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor(name=f"mp_worker_{work.ids[0]}") as cur:
+                if timeout_ms > 0:
+                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
+                cur.execute(sql, (work.ids,))
+
+                # Stream instead of fetchall to reduce per-worker memory
+                row_count = 0
+                while True:
+                    batch = cur.fetchmany(10_000)
+                    if not batch:
+                        break
+                    row_count += len(batch)
+
+                return (row_count, None)
+    except Exception as exc:
+        if work.ids:
+            return (
+                0,
+                f"Worker ids[{len(work.ids)}] {work.ids[0]}..{work.ids[-1]}: {exc!s}",
+            )
+        return (0, f"Worker ids[0]: {exc!s}")
 
 
 class MultiprocessingStrategy(BenchmarkStrategy):
     """
-    Fan-out reads across multiple processes by ID ranges.
+    Fan-out reads across multiple processes by ID chunks.
 
-    This stub does not yet collect RSS/CPU metrics or handle orchestration of
-    progress; it simply returns counts and timing.
+    Includes error capture and timeout protection for robustness.
     """
 
     name: str = "multiprocessing"
-    description: str = "ProcessPool with range partitioning over primary key."
+    description: str = "ProcessPool with ID chunking, error handling, and streaming."
 
     def __init__(
         self,
-        processes: Optional[int] = None,
+        processes: int | None = None,
         chunk_size: int = 50_000,
-        dsn_override: Optional[str] = None,
+        dsn_override: str | None = None,
     ) -> None:
         self.processes = processes or max(mp.cpu_count() - 1, 1)
         self.chunk_size = chunk_size
         self._dsn_override = dsn_override
 
-    def _make_work_items(self, total_rows: int) -> List[WorkItem]:
-        work: List[WorkItem] = []
-        start = 1
-        while start <= total_rows:
-            end = min(start + self.chunk_size - 1, total_rows)
-            work.append(WorkItem(start_id=start, end_id=end))
-            start = end + 1
+    def _make_work_items(self, ids: Sequence[int]) -> list[WorkItem]:
+        work: list[WorkItem] = []
+        for start in range(0, len(ids), self.chunk_size):
+            chunk_ids = list(ids[start : start + self.chunk_size])
+            if chunk_ids:
+                work.append(WorkItem(ids=chunk_ids))
         return work
 
     def execute(self, limit: int) -> StrategyResult:
         """
-        Execute the multiprocessing fan-out and return basic metrics.
+        Execute multiprocessing with timeout and error capture.
 
-        NOTE: Duration timing is handled by the orchestrator's profiler to correctly
-        measure wall-clock time including worker process startup/shutdown. The main
-        process only coordinates work distribution and would not capture actual
-        worker execution time if measured here.
+        Note: Duration is measured by orchestrator profiler to include
+        process spawn overhead, ID selection, and result aggregation.
         """
-        # Build DSN once; workers get a string to connect independently.
         if self._dsn_override:
             dsn = self._dsn_override
         else:
-            settings = get_settings()
-            dsn = (
-                f"postgresql://{settings.db_user}:{settings.db_password}"
-                f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
+            dsn = build_dsn()
+
+        timeout_ms = get_settings().db_statement_timeout_ms
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                if timeout_ms > 0:
+                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
+                cur.execute("SELECT id FROM public.records ORDER BY id LIMIT %s;", (limit,))
+                ids = [row[0] for row in cur.fetchall()]
+
+        if not ids:
+            return StrategyResult(
+                rows=0,
+                peak_rss_bytes=None,
+                notes=f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}, ids=0",
+                error=None,
             )
 
-        work_items: Sequence[WorkItem] = self._make_work_items(limit)
+        work_items: Sequence[WorkItem] = self._make_work_items(ids)
 
         rows_read = 0
-        worker = partial(_fetch_range, dsn)
-        with mp.Pool(processes=self.processes) as pool:
-            for count in pool.imap_unordered(worker, work_items):
-                rows_read += count
+        errors: list[str] = []
+        worker = partial(_fetch_ids, dsn, timeout_ms)
 
-        # Let orchestrator measure duration correctly via profiler
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=self.processes) as pool:
+            try:
+                # Add timeout to prevent hanging (10 minutes)
+                results = pool.map_async(worker, work_items).get(timeout=600)
+
+                for count, error in results:
+                    if error:
+                        errors.append(error)
+                    else:
+                        rows_read += count
+
+            except mp.TimeoutError:
+                pool.terminate()
+                pool.join()
+                errors.append("Workers timed out after 10 minutes")
+
+        notes = f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}, ids={len(ids)}"
+        if errors:
+            notes += f", errors={len(errors)}"
+
         return StrategyResult(
             rows=rows_read,
-            peak_rss_bytes=None,  # Not measured yet
-            notes=f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}",
+            peak_rss_bytes=None,  # Cannot measure worker memory from main process
+            notes=notes,
+            error="; ".join(errors[:3]) if errors else None,
         )
 
 

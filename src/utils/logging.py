@@ -1,17 +1,17 @@
 """
 Structured logging utilities for the SQL Throughput Challenge.
 
-This stub centralizes logging configuration to keep the CLI, orchestrator,
-and strategies consistent. It favors standard library logging with a
+Centralizes logging configuration so CLI, orchestrator, and strategies share
+the same handlers/formatters. It favors standard library logging with a
 human-readable formatter by default and an optional JSON formatter for
 structured logs (useful for pipelines/CI).
 
 Usage:
     from src.utils.logging import configure_logging, get_logger
 
-    configure_logging(level="INFO", json=False)
+    configure_logging(level="INFO", json_logs=False)
     log = get_logger(__name__)
-    log.info("message", extra={"rows": 1000})
+    log.info("message", extra={"rows": 1000, "strategy": "naive"})
 """
 
 from __future__ import annotations
@@ -19,12 +19,37 @@ from __future__ import annotations
 import json
 import logging
 import logging.config
-from typing import Any, Dict, Optional
+from typing import Any
+
+_STANDARD_LOG_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__.keys())
+
+
+def _record_extra_fields(record: logging.LogRecord) -> dict[str, Any]:
+    """Extract non-standard LogRecord fields injected via logging `extra=`."""
+    extra_fields: dict[str, Any] = {}
+
+    for key, value in record.__dict__.items():
+        if key in _STANDARD_LOG_RECORD_FIELDS or key in {"message", "asctime", "extra"}:
+            continue
+        extra_fields[key] = value
+
+    # Backward-compatible support for callers that set `extra={"extra": {...}}`.
+    legacy_extra = getattr(record, "extra", None)
+    if isinstance(legacy_extra, dict):
+        extra_fields.update(legacy_extra)
+
+    return extra_fields
 
 
 def _json_formatter(record: logging.LogRecord) -> str:
-    """Render a log record as JSON string."""
-    payload: Dict[str, Any] = {
+    """
+    Render a log record as a JSON string.
+
+    Output always includes `level`, `logger`, and `message`.
+    Any non-standard fields added through `logging`'s `extra=` argument are
+    promoted to top-level JSON keys.
+    """
+    payload: dict[str, Any] = {
         "level": record.levelname,
         "logger": record.name,
         "message": record.getMessage(),
@@ -33,15 +58,14 @@ def _json_formatter(record: logging.LogRecord) -> str:
         payload["exc_info"] = logging.Formatter().formatException(record.exc_info)
     if record.stack_info:
         payload["stack_info"] = record.stack_info
-    if hasattr(record, "extra") and isinstance(record.extra, dict):
-        payload.update(record.extra)
+    payload.update(_record_extra_fields(record))
     return json.dumps(payload)
 
 
 class JsonFormatter(logging.Formatter):
-    """Minimal JSON formatter for structured logs."""
+    """JSON formatter for structured logs."""
 
-    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+    def format(self, record: logging.LogRecord) -> str:
         return _json_formatter(record)
 
 
@@ -92,11 +116,11 @@ def configure_logging(
     )
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     """
     Get a logger with the given name. If name is None, returns the root logger.
     """
     return logging.getLogger(name)
 
 
-__all__ = ["configure_logging", "get_logger", "JsonFormatter"]
+__all__ = ["JsonFormatter", "configure_logging", "get_logger"]

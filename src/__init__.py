@@ -17,40 +17,28 @@ design patterns, resource management, structured logging, and comprehensive test
 from __future__ import annotations
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
+__author__ = "Aluizio Lira"
 __license__ = "MIT"
 
 # Public API exports
 from src.config import Settings, get_settings
 from src.orchestrator import available_strategies, run_strategies
-from src.strategies.abstract import (
-    AbstractBenchmarkStrategy,
-    BenchmarkStrategy,
-    StrategyResult,
-)
+from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 from src.utils.logging import configure_logging, get_logger
-from src.utils.profiler import ProfileStats, profile_block, profile_function
+from src.utils.profiler import ProfileStats, profile_block
 
 __all__ = [
-    # Version info
-    "__version__",
+    "BenchmarkStrategy",
+    "ProfileStats",
+    "Settings",
+    "StrategyResult",
     "__author__",
     "__license__",
-    # Configuration
-    "Settings",
-    "get_settings",
-    # Orchestration
+    "__version__",
     "available_strategies",
-    "run_strategies",
-    # Strategy abstractions
-    "BenchmarkStrategy",
-    "AbstractBenchmarkStrategy",
-    "StrategyResult",
-    # Logging
     "configure_logging",
     "get_logger",
-    # Profiling
-    "ProfileStats",
+    "get_settings",
     "profile_block",
-    "profile_function",
+    "run_strategies",
 ]

@@ -8,11 +8,11 @@ approaches (cursor pagination, pooling, async streaming, multiprocessing).
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import psycopg
 
-from src.infrastructure.db_factory import get_sync_connection
+from src.config import get_settings
+from src.infrastructure.db_factory import apply_statement_timeout, get_sync_connection
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 
@@ -28,7 +28,7 @@ class NaiveStrategy(BenchmarkStrategy):
     name: str = "naive"
     description: str = "Single SELECT * with fetchall (sync, no pagination/pooling)."
 
-    def __init__(self, dsn_override: Optional[str] = None) -> None:
+    def __init__(self, dsn_override: str | None = None) -> None:
         self._dsn_override = dsn_override
 
     def execute(self, limit: int) -> StrategyResult:
@@ -36,9 +36,10 @@ class NaiveStrategy(BenchmarkStrategy):
         Run the naive fetch-all query and return basic metrics.
         """
         sql = "SELECT * FROM public.records ORDER BY id LIMIT %s;"
-        start = time.perf_counter()
         rows_fetched: int = 0
+        timeout_ms = get_settings().db_statement_timeout_ms
 
+        start_time = time.perf_counter()
         # Use connection factory; allow optional DSN override for testing.
         if self._dsn_override:
             conn = psycopg.connect(self._dsn_override)
@@ -47,19 +48,19 @@ class NaiveStrategy(BenchmarkStrategy):
 
         try:
             with conn.cursor() as cur:
+                apply_statement_timeout(cur, timeout_ms)
                 cur.execute(sql, (limit,))
                 results = cur.fetchall()
                 rows_fetched = len(results)
         finally:
             conn.close()
-
-        duration = time.perf_counter() - start
-        throughput = rows_fetched / duration if duration > 0 else 0.0
+        duration_seconds = time.perf_counter() - start_time
+        throughput_rows_per_sec = rows_fetched / duration_seconds if duration_seconds > 0 else 0.0
 
         return StrategyResult(
             rows=rows_fetched,
-            duration_seconds=duration,
-            throughput_rows_per_sec=throughput,
+            duration_seconds=duration_seconds,
+            throughput_rows_per_sec=throughput_rows_per_sec,
             peak_rss_bytes=None,  # Not measured in this baseline
             notes="Naive fetchall baseline; no pagination or pooling.",
         )

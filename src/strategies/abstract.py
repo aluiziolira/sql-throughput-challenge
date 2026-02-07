@@ -2,32 +2,55 @@
 Abstract strategy interfaces and result contracts for the SQL Throughput Challenge.
 
 Concrete strategies (e.g., naive, cursor pagination, async stream, multiprocessing)
-should implement the BenchmarkStrategy ABC and return a StrategyResult TypedDict to
+should implement the BenchmarkStrategy Protocol and return a StrategyResult TypedDict to
 standardize downstream orchestration and reporting.
 """
 
 from __future__ import annotations
 
-import abc
-from typing import Any, Dict, Optional, Protocol, TypedDict, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
 
 class StrategyResult(TypedDict, total=False):
     """
-    Minimal metrics contract returned by strategies.
+    Metrics contract returned by strategies.
 
-    Fields are optional to keep implementations lightweight; orchestrator/reporters
-    should tolerate missing values and enrich when possible.
+    ## Responsibility Matrix
+
+    ### Strategy MUST Provide
+    - `rows: int` - Actual number of rows processed
+
+    ### Strategy MAY Provide (Optional)
+    - `notes: str` - Strategy-specific details (batch size, pool config, etc.)
+    - `error: str` - Error message if execution failed
+    - `extra: Dict[str, Any]` - Custom metrics for advanced use cases
+
+    ### Orchestrator WILL Override
+    The orchestrator profiler wraps each `strategy.execute()` call and
+    provides/overrides these fields:
+    - `duration_seconds: float` - Wall-clock time (includes overhead)
+    - `throughput_rows_per_sec: float` - Calculated from rows/duration
+    - `peak_rss_bytes: int` - Peak memory via background sampling
+    - `cpu_percent: float` - CPU utilization via psutil
+
+    ## Why This Design?
+
+    Multiprocessing strategies cannot measure per-worker memory because
+    workers run in separate OS processes. The orchestrator profiler
+    measures the main process, which includes coordination overhead but
+    not individual worker resources.
+
+    See docs/architecture-metrics.md for full details.
     """
 
     rows: int
     duration_seconds: float
     throughput_rows_per_sec: float
-    peak_rss_bytes: Optional[int]
-    cpu_percent: Optional[float]
-    error: Optional[str]
-    notes: Optional[str]
-    extra: Dict[str, Any]
+    peak_rss_bytes: int | None
+    cpu_percent: float | None
+    error: str | None
+    notes: str | None
+    extra: dict[str, Any]
 
 
 @runtime_checkable
@@ -41,6 +64,13 @@ class BenchmarkStrategy(Protocol):
         A short machine-friendly identifier.
     description : str
         A human-friendly summary of the approach.
+
+    Lifecycle
+    ---------
+    Strategies MAY expose a callable ``close()`` method for resource cleanup
+    (for example connection pools). The orchestrator performs best-effort
+    lifecycle hygiene by invoking ``close()`` when present after each run.
+    Implementations should keep ``close()`` idempotent.
     """
 
     name: str
@@ -63,24 +93,7 @@ class BenchmarkStrategy(Protocol):
         ...
 
 
-class AbstractBenchmarkStrategy(abc.ABC):
-    """
-    Optional ABC helper for class-based implementations.
-
-    Subclasses should set `name` and `description` and implement `execute`.
-    """
-
-    name: str
-    description: str
-
-    @abc.abstractmethod
-    def execute(self, limit: int) -> StrategyResult:  # pragma: no cover - interface only
-        """Run the strategy and return metrics."""
-        raise NotImplementedError
-
-
 __all__ = [
-    "StrategyResult",
     "BenchmarkStrategy",
-    "AbstractBenchmarkStrategy",
+    "StrategyResult",
 ]

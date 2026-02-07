@@ -9,6 +9,7 @@ additional fields as the project evolves.
 from __future__ import annotations
 
 from functools import lru_cache
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     db_user: str = Field("postgres", alias="DB_USER")
     db_password: str = Field("postgres", alias="DB_PASSWORD")
     db_name: str = Field("throughput_challenge", alias="DB_NAME")
+    db_statement_timeout_ms: int = Field(0, alias="DB_STATEMENT_TIMEOUT_MS")
 
     # Application
     app_env: str = Field("development", alias="APP_ENV")

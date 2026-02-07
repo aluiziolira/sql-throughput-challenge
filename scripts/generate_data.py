@@ -13,32 +13,27 @@ import random
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import psycopg
 import typer
 
-from src.config import get_settings
+from src.infrastructure.db_factory import build_dsn
 
 app = typer.Typer(help="Generate synthetic data and load into Postgres (CSV + COPY).")
 
 
-def _build_dsn(dsn_override: Optional[str]) -> str:
+def _build_dsn(dsn_override: str | None) -> str:
     if dsn_override:
         return dsn_override
-    settings = get_settings()
-    return (
-        f"postgresql://{settings.db_user}:{settings.db_password}"
-        f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
-    )
+    return build_dsn()
 
 
 def _generate_rows_csv(csv_path: Path, rows: int, batch_size: int, seed: int) -> None:
     rng = random.Random(seed)
     categories = ["alpha", "beta", "gamma", "delta"]
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -117,13 +112,13 @@ def main(
         "--seed",
         help="Deterministic RNG seed.",
     ),
-    output: Optional[Path] = typer.Option(
+    output: Path | None = typer.Option(
         None,
         "--output",
         "-o",
         help="Optional CSV output path (if omitted, a temp file will be used).",
     ),
-    dsn: Optional[str] = typer.Option(
+    dsn: str | None = typer.Option(
         None,
         "--dsn",
         help="Optional DSN override for Postgres.",

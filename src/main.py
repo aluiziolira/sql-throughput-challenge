@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import multiprocessing
 import sys
-from typing import Optional
 
 import typer
 
 from src.config import get_settings
-from src.orchestrator import available_strategies, run_strategies
+from src.orchestrator import RunConfig, available_strategies, run_strategies
 from src.reporter import print_results
 from src.utils.logging import configure_logging
 
@@ -35,11 +35,17 @@ def run(
         "-s",
         help="Strategy to run (e.g., naive, cursor_pagination, pooled_sync, multiprocessing, async_stream, all).",
     ),
-    rows: Optional[int] = typer.Option(
+    rows: int | None = typer.Option(
         None,
         "--rows",
         "-r",
         help="Override number of rows to process (default from settings).",
+    ),
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        "-c",
+        help="Concurrency level (processes for multiprocessing, cursors for async). Overrides BENCHMARK_CONCURRENCY.",
     ),
     warmup: bool = typer.Option(
         False,
@@ -64,22 +70,30 @@ def run(
         return
 
     strategy_names = ["all"] if strategy == "all" else [strategy]
+
+    # Display effective concurrency
+    effective_concurrency = concurrency or settings.benchmark_concurrency
     typer.echo(
         f"Running strategy='{strategy}' for rows={total_rows} "
-        f"(batch={settings.benchmark_batch_size}, concurrency={settings.benchmark_concurrency}, "
+        f"(batch={settings.benchmark_batch_size}, concurrency={effective_concurrency}, "
         f"warmup={warmup}, runs={runs})."
     )
+
     results = run_strategies(
-        strategy_names=strategy_names,
-        limit=total_rows,
-        persist=True,
-        warmup=warmup,
-        runs=runs,
+        RunConfig(
+            strategy_names=strategy_names,
+            limit=total_rows,
+            persist=True,
+            warmup=warmup,
+            runs=runs,
+            concurrency=concurrency,
+        )
     )
     print_results(results)
 
 
 def main() -> None:
+    """CLI entry point with multiprocessing support."""
     try:
         app()
     except KeyboardInterrupt:
@@ -88,4 +102,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Required for multiprocessing on Windows (spawn start method)
+    # Without this guard, child processes will re-execute main()
+    multiprocessing.freeze_support()
     main()
