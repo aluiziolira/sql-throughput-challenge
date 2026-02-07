@@ -34,7 +34,3 @@ coverage.xml
 .vscode/
 .idea/
 .DS_Store
-
-# Project outputs
-results/
-data/

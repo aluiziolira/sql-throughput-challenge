@@ -1,0 +1,481 @@
+{
+  "limit": 500000,
+  "results": [
+    {
+      "cpu_percent": {
+        "max": 97.7,
+        "mean": 97.5,
+        "median": 97.5,
+        "min": 97.3,
+        "stddev": 0.2
+      },
+      "duration_seconds": {
+        "max": 17.1,
+        "mean": 16.97,
+        "median": 16.91,
+        "min": 16.89,
+        "stddev": 0.12
+      },
+      "individual_runs": [
+        {
+          "cpu_percent": 97.7,
+          "duration_seconds": 17.1,
+          "limit": 500000,
+          "notes": "asyncpg batch_size=10000 concurrency=4",
+          "peak_rss_bytes": 97439744,
+          "profile": {
+            "cpu_percent": 97.7,
+            "duration_seconds": 17.1,
+            "end_ts": 15473.808,
+            "label": "async_stream",
+            "peak_rss_bytes": 97439744,
+            "start_ts": 15456.704
+          },
+          "rows": 500000,
+          "run": 1,
+          "strategy": "async_stream",
+          "throughput_rows_per_sec": 29239.77
+        },
+        {
+          "cpu_percent": 97.5,
+          "duration_seconds": 16.89,
+          "limit": 500000,
+          "notes": "asyncpg batch_size=10000 concurrency=4",
+          "peak_rss_bytes": 97976320,
+          "profile": {
+            "cpu_percent": 97.5,
+            "duration_seconds": 16.89,
+            "end_ts": 15490.701,
+            "label": "async_stream",
+            "peak_rss_bytes": 97976320,
+            "start_ts": 15473.813
+          },
+          "rows": 500000,
+          "run": 2,
+          "strategy": "async_stream",
+          "throughput_rows_per_sec": 29603.32
+        },
+        {
+          "cpu_percent": 97.3,
+          "duration_seconds": 16.91,
+          "limit": 500000,
+          "notes": "asyncpg batch_size=10000 concurrency=4",
+          "peak_rss_bytes": 97976320,
+          "profile": {
+            "cpu_percent": 97.3,
+            "duration_seconds": 16.91,
+            "end_ts": 15507.613,
+            "label": "async_stream",
+            "peak_rss_bytes": 97976320,
+            "start_ts": 15490.703
+          },
+          "rows": 500000,
+          "run": 3,
+          "strategy": "async_stream",
+          "throughput_rows_per_sec": 29568.3
+        }
+      ],
+      "limit": 500000,
+      "peak_rss_bytes": {
+        "max": 97976320,
+        "mean": 97797461,
+        "median": 97976320,
+        "min": 97439744,
+        "stddev": 309792
+      },
+      "rows": 500000,
+      "runs": 3,
+      "strategy": "async_stream",
+      "throughput_rows_per_sec": {
+        "max": 29603.32,
+        "mean": 29470.46,
+        "median": 29568.3,
+        "min": 29239.77,
+        "stddev": 200.55
+      }
+    },
+    {
+      "cpu_percent": {
+        "max": 94.2,
+        "mean": 93.7,
+        "median": 93.7,
+        "min": 93.1,
+        "stddev": 0.6
+      },
+      "duration_seconds": {
+        "max": 25.07,
+        "mean": 24.21,
+        "median": 23.89,
+        "min": 23.66,
+        "stddev": 0.76
+      },
+      "individual_runs": [
+        {
+          "cpu_percent": 93.1,
+          "duration_seconds": 23.66,
+          "limit": 500000,
+          "notes": "Cursor pagination batch_size=10000.",
+          "peak_rss_bytes": 125403136,
+          "profile": {
+            "cpu_percent": 93.1,
+            "duration_seconds": 23.66,
+            "end_ts": 15531.281,
+            "label": "cursor_pagination",
+            "peak_rss_bytes": 125403136,
+            "start_ts": 15507.619
+          },
+          "rows": 500000,
+          "run": 1,
+          "strategy": "cursor_pagination",
+          "throughput_rows_per_sec": 21132.71
+        },
+        {
+          "cpu_percent": 94.2,
+          "duration_seconds": 25.07,
+          "limit": 500000,
+          "notes": "Cursor pagination batch_size=10000.",
+          "peak_rss_bytes": 127328256,
+          "profile": {
+            "cpu_percent": 94.2,
+            "duration_seconds": 25.07,
+            "end_ts": 15556.35,
+            "label": "cursor_pagination",
+            "peak_rss_bytes": 127328256,
+            "start_ts": 15531.284
+          },
+          "rows": 500000,
+          "run": 2,
+          "strategy": "cursor_pagination",
+          "throughput_rows_per_sec": 19944.16
+        },
+        {
+          "cpu_percent": 93.7,
+          "duration_seconds": 23.89,
+          "limit": 500000,
+          "notes": "Cursor pagination batch_size=10000.",
+          "peak_rss_bytes": 128524288,
+          "profile": {
+            "cpu_percent": 93.7,
+            "duration_seconds": 23.89,
+            "end_ts": 15580.242,
+            "label": "cursor_pagination",
+            "peak_rss_bytes": 128524288,
+            "start_ts": 15556.354
+          },
+          "rows": 500000,
+          "run": 3,
+          "strategy": "cursor_pagination",
+          "throughput_rows_per_sec": 20929.26
+        }
+      ],
+      "limit": 500000,
+      "peak_rss_bytes": {
+        "max": 128524288,
+        "mean": 127085226,
+        "median": 127328256,
+        "min": 125403136,
+        "stddev": 1574704
+      },
+      "rows": 500000,
+      "runs": 3,
+      "strategy": "cursor_pagination",
+      "throughput_rows_per_sec": {
+        "max": 21132.71,
+        "mean": 20668.71,
+        "median": 20929.26,
+        "min": 19944.16,
+        "stddev": 635.67
+      }
+    },
+    {
+      "cpu_percent": {
+        "max": 273.3,
+        "mean": 267.1,
+        "median": 266.7,
+        "min": 261.3,
+        "stddev": 6.0
+      },
+      "duration_seconds": {
+        "max": 4.97,
+        "mean": 4.75,
+        "median": 4.89,
+        "min": 4.4,
+        "stddev": 0.31
+      },
+      "individual_runs": [
+        {
+          "cpu_percent": 266.7,
+          "duration_seconds": 4.89,
+          "error": null,
+          "limit": 500000,
+          "notes": "ProcessPool size=4, chunk_size=50000, ids=500000",
+          "peak_rss_bytes": 628985856,
+          "profile": {
+            "cpu_percent": 266.7,
+            "duration_seconds": 4.89,
+            "end_ts": 15585.134,
+            "label": "multiprocessing",
+            "peak_rss_bytes": 628985856,
+            "start_ts": 15580.248
+          },
+          "rows": 500000,
+          "run": 1,
+          "strategy": "multiprocessing",
+          "throughput_rows_per_sec": 102249.49
+        },
+        {
+          "cpu_percent": 261.3,
+          "duration_seconds": 4.97,
+          "error": null,
+          "limit": 500000,
+          "notes": "ProcessPool size=4, chunk_size=50000, ids=500000",
+          "peak_rss_bytes": 628592640,
+          "profile": {
+            "cpu_percent": 261.3,
+            "duration_seconds": 4.97,
+            "end_ts": 15590.109,
+            "label": "multiprocessing",
+            "peak_rss_bytes": 628592640,
+            "start_ts": 15585.138
+          },
+          "rows": 500000,
+          "run": 2,
+          "strategy": "multiprocessing",
+          "throughput_rows_per_sec": 100603.62
+        },
+        {
+          "cpu_percent": 273.3,
+          "duration_seconds": 4.4,
+          "error": null,
+          "limit": 500000,
+          "notes": "ProcessPool size=4, chunk_size=50000, ids=500000",
+          "peak_rss_bytes": 631500800,
+          "profile": {
+            "cpu_percent": 273.3,
+            "duration_seconds": 4.4,
+            "end_ts": 15594.515,
+            "label": "multiprocessing",
+            "peak_rss_bytes": 631500800,
+            "start_ts": 15590.113
+          },
+          "rows": 500000,
+          "run": 3,
+          "strategy": "multiprocessing",
+          "throughput_rows_per_sec": 113636.36
+        }
+      ],
+      "limit": 500000,
+      "peak_rss_bytes": {
+        "max": 631500800,
+        "mean": 629693098,
+        "median": 628985856,
+        "min": 628592640,
+        "stddev": 1577812
+      },
+      "rows": 500000,
+      "runs": 3,
+      "strategy": "multiprocessing",
+      "throughput_rows_per_sec": {
+        "max": 113636.36,
+        "mean": 105496.49,
+        "median": 102249.49,
+        "min": 100603.62,
+        "stddev": 7097.21
+      }
+    },
+    {
+      "cpu_percent": {
+        "max": 93.3,
+        "mean": 92.9,
+        "median": 92.9,
+        "min": 92.6,
+        "stddev": 0.4
+      },
+      "duration_seconds": {
+        "max": 22.31,
+        "mean": 20.98,
+        "median": 20.49,
+        "min": 20.13,
+        "stddev": 1.17
+      },
+      "individual_runs": [
+        {
+          "cpu_percent": 93.3,
+          "duration_seconds": 22.31,
+          "limit": 500000,
+          "notes": "Naive fetchall baseline; no pagination or pooling.",
+          "peak_rss_bytes": 1797279744,
+          "profile": {
+            "cpu_percent": 93.3,
+            "duration_seconds": 22.31,
+            "end_ts": 15616.831,
+            "label": "naive",
+            "peak_rss_bytes": 1797279744,
+            "start_ts": 15594.518
+          },
+          "rows": 500000,
+          "run": 1,
+          "strategy": "naive",
+          "throughput_rows_per_sec": 22411.47
+        },
+        {
+          "cpu_percent": 92.6,
+          "duration_seconds": 20.49,
+          "limit": 500000,
+          "notes": "Naive fetchall baseline; no pagination or pooling.",
+          "peak_rss_bytes": 1883639808,
+          "profile": {
+            "cpu_percent": 92.6,
+            "duration_seconds": 20.49,
+            "end_ts": 15637.327,
+            "label": "naive",
+            "peak_rss_bytes": 1883639808,
+            "start_ts": 15616.836
+          },
+          "rows": 500000,
+          "run": 2,
+          "strategy": "naive",
+          "throughput_rows_per_sec": 24402.15
+        },
+        {
+          "cpu_percent": 92.9,
+          "duration_seconds": 20.13,
+          "limit": 500000,
+          "notes": "Naive fetchall baseline; no pagination or pooling.",
+          "peak_rss_bytes": 1884930048,
+          "profile": {
+            "cpu_percent": 92.9,
+            "duration_seconds": 20.13,
+            "end_ts": 15657.457,
+            "label": "naive",
+            "peak_rss_bytes": 1884930048,
+            "start_ts": 15637.332
+          },
+          "rows": 500000,
+          "run": 3,
+          "strategy": "naive",
+          "throughput_rows_per_sec": 24838.55
+        }
+      ],
+      "limit": 500000,
+      "peak_rss_bytes": {
+        "max": 1884930048,
+        "mean": 1855283200,
+        "median": 1883639808,
+        "min": 1797279744,
+        "stddev": 50236608
+      },
+      "rows": 500000,
+      "runs": 3,
+      "strategy": "naive",
+      "throughput_rows_per_sec": {
+        "max": 24838.55,
+        "mean": 23884.06,
+        "median": 24402.15,
+        "min": 22411.47,
+        "stddev": 1293.83
+      }
+    },
+    {
+      "cpu_percent": {
+        "max": 94.2,
+        "mean": 94.0,
+        "median": 93.9,
+        "min": 93.9,
+        "stddev": 0.2
+      },
+      "duration_seconds": {
+        "max": 25.36,
+        "mean": 24.42,
+        "median": 24.14,
+        "min": 23.76,
+        "stddev": 0.84
+      },
+      "individual_runs": [
+        {
+          "cpu_percent": 93.9,
+          "duration_seconds": 23.76,
+          "limit": 500000,
+          "notes": "pooled_sync batch_size=10000 pool=(2,4)",
+          "peak_rss_bytes": 896417792,
+          "profile": {
+            "cpu_percent": 93.9,
+            "duration_seconds": 23.76,
+            "end_ts": 15681.236,
+            "label": "pooled_sync",
+            "peak_rss_bytes": 896417792,
+            "start_ts": 15657.473
+          },
+          "rows": 500000,
+          "run": 1,
+          "strategy": "pooled_sync",
+          "throughput_rows_per_sec": 21043.77
+        },
+        {
+          "cpu_percent": 93.9,
+          "duration_seconds": 24.14,
+          "limit": 500000,
+          "notes": "pooled_sync batch_size=10000 pool=(2,4)",
+          "peak_rss_bytes": 892485632,
+          "profile": {
+            "cpu_percent": 93.9,
+            "duration_seconds": 24.14,
+            "end_ts": 15705.383,
+            "label": "pooled_sync",
+            "peak_rss_bytes": 892485632,
+            "start_ts": 15681.247
+          },
+          "rows": 500000,
+          "run": 2,
+          "strategy": "pooled_sync",
+          "throughput_rows_per_sec": 20712.51
+        },
+        {
+          "cpu_percent": 94.2,
+          "duration_seconds": 25.36,
+          "limit": 500000,
+          "notes": "pooled_sync batch_size=10000 pool=(2,4)",
+          "peak_rss_bytes": 891449344,
+          "profile": {
+            "cpu_percent": 94.2,
+            "duration_seconds": 25.36,
+            "end_ts": 15730.754,
+            "label": "pooled_sync",
+            "peak_rss_bytes": 891449344,
+            "start_ts": 15705.39
+          },
+          "rows": 500000,
+          "run": 3,
+          "strategy": "pooled_sync",
+          "throughput_rows_per_sec": 19716.09
+        }
+      ],
+      "limit": 500000,
+      "peak_rss_bytes": {
+        "max": 896417792,
+        "mean": 893450922,
+        "median": 892485632,
+        "min": 891449344,
+        "stddev": 2621108
+      },
+      "rows": 500000,
+      "runs": 3,
+      "strategy": "pooled_sync",
+      "throughput_rows_per_sec": {
+        "max": 21043.77,
+        "mean": 20490.79,
+        "median": 20712.51,
+        "min": 19716.09,
+        "stddev": 691.05
+      }
+    }
+  ],
+  "strategies": [
+    "async_stream",
+    "cursor_pagination",
+    "multiprocessing",
+    "naive",
+    "pooled_sync"
+  ],
+  "timestamp": "2026-02-07T00:34:46.821907+00:00"
+}
