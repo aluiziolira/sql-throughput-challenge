@@ -10,15 +10,15 @@ Provides fixtures for:
 from __future__ import annotations
 
 import os
-import subprocess
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import psycopg
 import pytest
 
-from src.config import Settings, get_settings
+from scripts.generate_data import _copy_into_db, _generate_rows_csv
+from src.config import Settings
 
 
 @pytest.fixture(scope="session")
@@ -107,7 +107,7 @@ def db_schema_initialized(db_connection: psycopg.Connection) -> bool:
             # Read and execute init.sql
             init_sql_path = Path(__file__).parent.parent / "db" / "init.sql"
             if init_sql_path.exists():
-                with open(init_sql_path, "r") as f:
+                with open(init_sql_path) as f:
                     cur.execute(f.read())
                 db_connection.commit()
 
@@ -149,12 +149,41 @@ def seeded_db_small(
         csv_path = Path(tmpdir) / "test_data.csv"
 
         # Call generate_data module programmatically
-        from scripts.generate_data import _copy_into_db, _generate_rows_csv
-
         _generate_rows_csv(csv_path, rows=rows_to_seed, batch_size=50, seed=42)
         _copy_into_db(test_dsn, csv_path)
 
     # Verify count
+    with db_connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.records;")
+        count = cur.fetchone()[0]
+
+    return count
+
+
+@pytest.fixture(scope="function")
+def seeded_db_gapped(
+    db_connection: psycopg.Connection,
+    clean_records_table,
+    test_dsn: str,
+) -> int:
+    """
+    Seed a dataset with intentionally gapped IDs.
+
+    Returns the number of rows remaining after deletions.
+    """
+    rows_to_seed = 50
+    ids_to_delete = (2, 4, 6, 8, 10)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = Path(tmpdir) / "test_data.csv"
+
+        _generate_rows_csv(csv_path, rows=rows_to_seed, batch_size=50, seed=42)
+        _copy_into_db(test_dsn, csv_path)
+
+    with db_connection.cursor() as cur:
+        cur.execute("DELETE FROM public.records WHERE id = ANY(%s);", (list(ids_to_delete),))
+    db_connection.commit()
+
     with db_connection.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM public.records;")
         count = cur.fetchone()[0]
@@ -178,8 +207,6 @@ def seeded_db_medium(
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_path = Path(tmpdir) / "test_data.csv"
 
-        from scripts.generate_data import _copy_into_db, _generate_rows_csv
-
         _generate_rows_csv(csv_path, rows=rows_to_seed, batch_size=2000, seed=42)
         _copy_into_db(test_dsn, csv_path)
 
@@ -188,19 +215,3 @@ def seeded_db_medium(
         count = cur.fetchone()[0]
 
     return count
-
-
-@pytest.fixture(scope="session")
-def settings_stub():
-    """
-    Legacy stub for backward compatibility.
-
-    Use test_settings fixture instead.
-    """
-    return {
-        "db_host": "localhost",
-        "db_port": 5432,
-        "db_user": "postgres",
-        "db_password": "postgres",
-        "db_name": "throughput_challenge",
-    }
