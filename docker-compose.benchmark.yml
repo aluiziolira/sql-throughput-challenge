@@ -49,3 +49,4 @@ services:
             PYTHONHASHSEED: "42"
         volumes:
             - ./results:/app/results
+        command: ["run", "--strategy", "all", "--rows", "100000", "--warmup"]
