@@ -15,6 +15,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 import psycopg
 import typer
@@ -50,7 +51,7 @@ def _generate_rows_csv(csv_path: Path, rows: int, batch_size: int, seed: int) ->
         )
 
         buffer: list[list[str]] = []
-        for i in range(rows):
+        for _i in range(rows):
             category = rng.choice(categories)
             amount = round(rng.uniform(1, 10_000), 2)
             is_active = rng.choice([True, False])
@@ -94,40 +95,39 @@ def _copy_into_db(dsn: str, csv_path: Path) -> int:
 
 
 @app.command()
-def main(
-    rows: int = typer.Option(
-        100_000,
-        "--rows",
-        "-r",
-        help="Number of rows to generate.",
-    ),
-    batch_size: int = typer.Option(
-        10_000,
-        "--batch-size",
-        "-b",
-        help="Batch size for CSV buffering during generation.",
-    ),
-    seed: int = typer.Option(
-        42,
-        "--seed",
-        help="Deterministic RNG seed.",
-    ),
-    output: Path | None = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="Optional CSV output path (if omitted, a temp file will be used).",
-    ),
-    dsn: str | None = typer.Option(
-        None,
-        "--dsn",
-        help="Optional DSN override for Postgres.",
-    ),
-    no_load: bool = typer.Option(
-        False,
-        "--no-load",
-        help="Only generate CSV; skip loading into Postgres.",
-    ),
+def main(  # noqa: PLR0913
+    rows: Annotated[
+        int,
+        typer.Option("--rows", "-r", help="Number of rows to generate."),
+    ] = 100_000,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            "-b",
+            help="Batch size for CSV buffering during generation.",
+        ),
+    ] = 10_000,
+    seed: Annotated[
+        int,
+        typer.Option("--seed", help="Deterministic RNG seed."),
+    ] = 42,
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Optional CSV output path (if omitted, a temp file will be used).",
+        ),
+    ] = None,
+    dsn: Annotated[
+        str | None,
+        typer.Option("--dsn", help="Optional DSN override for Postgres."),
+    ] = None,
+    no_load: Annotated[
+        bool,
+        typer.Option("--no-load", help="Only generate CSV; skip loading into Postgres."),
+    ] = False,
 ) -> None:
     """
     Generate synthetic data and optionally load it into Postgres using COPY.
