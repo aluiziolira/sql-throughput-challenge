@@ -205,34 +205,19 @@ class AsyncStreamStrategy(BenchmarkStrategy):
         Raises RuntimeError if called from within async context.
         Use execute_async() instead from async code.
         """
-        start_time = time.perf_counter()
         try:
             # Check if event loop is already running
             asyncio.get_running_loop()
-            # We're inside an async context - cannot use asyncio.run()
-            raise RuntimeError(
-                "AsyncStreamStrategy.execute() called from async context. "
-                "Use execute_async() instead or call from synchronous code."
-            )
         except RuntimeError as e:
-            if "no running event loop" in str(e).lower():
-                # No loop running - safe to create one
-                if self.concurrency > 1:
-                    rows_read = asyncio.run(self._stream_concurrent(limit))
-                else:
-                    rows_read = asyncio.run(self._stream(limit))
-            else:
-                # Re-raise if it's our error message
+            if "no running event loop" not in str(e).lower():
                 raise
-        duration_seconds = time.perf_counter() - start_time
-        throughput_rows_per_sec = rows_read / duration_seconds if duration_seconds > 0 else 0.0
+            # No loop running - safe to create one and delegate to the async-native path.
+            return asyncio.run(self.execute_async(limit))
 
-        return StrategyResult(
-            rows=rows_read,
-            duration_seconds=duration_seconds,
-            throughput_rows_per_sec=throughput_rows_per_sec,
-            peak_rss_bytes=None,
-            notes=f"asyncpg batch_size={self.batch_size} concurrency={self.concurrency}",
+        # We're inside an async context - cannot use asyncio.run()
+        raise RuntimeError(
+            "AsyncStreamStrategy.execute() called from async context. "
+            "Use execute_async() instead or call from synchronous code."
         )
 
     async def execute_async(self, limit: int) -> StrategyResult:
