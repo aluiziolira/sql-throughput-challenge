@@ -2,11 +2,15 @@
 Database connection factory utilities for the SQL Throughput Challenge.
 
 Provides centralized connection utilities with retry logic for transient
-connection failures using tenacity.
+connection failures using tenacity, plus shared SQL/cursor primitives used
+by the sync read strategies (naive, cursor_pagination, pooled_sync,
+multiprocessing) to avoid re-implementing the same fetch mechanics in
+each one.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -19,6 +23,9 @@ from tenacity import (
 )
 
 from src.config import get_settings
+
+# Shared by strategies that read the full row set up to a LIMIT.
+SELECT_RECORDS_SQL = "SELECT * FROM public.records ORDER BY id LIMIT %s;"
 
 
 def build_dsn() -> str:
@@ -40,9 +47,6 @@ async def async_apply_statement_timeout(conn: Any, timeout_ms: int) -> None:
     """Apply transaction-local statement timeout for asyncpg usage."""
     if timeout_ms > 0:
         await conn.execute("SET LOCAL statement_timeout = $1", timeout_ms)
-
-
-# Convenience functions for backward compatibility and simple use cases
 
 
 # Tenacity provides production resilience for transient connection failures.
@@ -73,9 +77,40 @@ def get_sync_connection() -> Connection:
     return psycopg.connect(build_dsn())
 
 
+def resolve_sync_connection(dsn_override: str | None) -> Connection:
+    """
+    Acquire a sync connection, honoring a strategy's `dsn_override`.
+
+    With no override, goes through `get_sync_connection()` (retrying,
+    settings-derived DSN). An override (used by tests to point at a known
+    DSN) connects directly without retry, since tests want immediate
+    failure rather than a delayed retry loop.
+
+    Intended to be used as `with resolve_sync_connection(...) as conn:`.
+    psycopg3's `Connection.__exit__` commits (or rolls back, on exception)
+    *and* closes the connection as long as it isn't pool-owned - unlike
+    psycopg2, no separate `conn.close()` is needed.
+    """
+    if dsn_override:
+        return psycopg.connect(dsn_override)
+    return get_sync_connection()
+
+
+def fetch_in_batches(cursor: psycopg.Cursor, batch_size: int) -> Iterator[list[tuple[Any, ...]]]:
+    """Yield successive `fetchmany(batch_size)` batches from an open cursor until exhausted."""
+    while True:
+        batch = cursor.fetchmany(batch_size)
+        if not batch:
+            break
+        yield batch
+
+
 __all__ = [
+    "SELECT_RECORDS_SQL",
     "apply_statement_timeout",
     "async_apply_statement_timeout",
     "build_dsn",
+    "fetch_in_batches",
     "get_sync_connection",
+    "resolve_sync_connection",
 ]

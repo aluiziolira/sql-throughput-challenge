@@ -17,7 +17,7 @@ from functools import partial
 import psycopg
 
 from src.config import get_settings
-from src.infrastructure.db_factory import build_dsn
+from src.infrastructure.db_factory import build_dsn, fetch_in_batches
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 
@@ -45,12 +45,7 @@ def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | No
                 cur.execute(sql, (work.ids,))
 
                 # Stream instead of fetchall to reduce per-worker memory
-                row_count = 0
-                while True:
-                    batch = cur.fetchmany(10_000)
-                    if not batch:
-                        break
-                    row_count += len(batch)
+                row_count = sum(len(batch) for batch in fetch_in_batches(cur, 10_000))
 
                 return (row_count, None)
     except Exception as exc:
@@ -97,10 +92,7 @@ class MultiprocessingStrategy(BenchmarkStrategy):
         Note: Duration is measured by orchestrator profiler to include
         process spawn overhead, ID selection, and result aggregation.
         """
-        if self._dsn_override:
-            dsn = self._dsn_override
-        else:
-            dsn = build_dsn()
+        dsn = self._dsn_override or build_dsn()
 
         timeout_ms = get_settings().db_statement_timeout_ms
         with psycopg.connect(dsn) as conn:
