@@ -17,7 +17,7 @@ from functools import partial
 import psycopg
 
 from src.config import get_settings
-from src.infrastructure.db_factory import build_dsn
+from src.infrastructure.db_factory import build_dsn, fetch_in_batches
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 
@@ -45,12 +45,7 @@ def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | No
                 cur.execute(sql, (work.ids,))
 
                 # Stream instead of fetchall to reduce per-worker memory
-                row_count = 0
-                while True:
-                    batch = cur.fetchmany(10_000)
-                    if not batch:
-                        break
-                    row_count += len(batch)
+                row_count = sum(len(batch) for batch in fetch_in_batches(cur, 10_000))
 
                 return (row_count, None)
     except Exception as exc:

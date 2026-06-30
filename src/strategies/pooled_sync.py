@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import time
-
 from psycopg_pool import ConnectionPool
 
 from src.config import get_settings
-from src.infrastructure.db_factory import apply_statement_timeout, build_dsn
+from src.infrastructure.db_factory import (
+    SELECT_RECORDS_SQL,
+    apply_statement_timeout,
+    build_dsn,
+    fetch_in_batches,
+)
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
+from src.utils.timing import run_timed
 
 
 class PooledSyncStrategy(BenchmarkStrategy):
@@ -57,28 +61,24 @@ class PooledSyncStrategy(BenchmarkStrategy):
             self._pool_instance.close()
             self._pool_instance = None
 
-    def execute(self, limit: int) -> StrategyResult:
-        sql = "SELECT * FROM public.records ORDER BY id LIMIT %s;"
-        rows_fetched = 0
+    def _fetch_all(self, limit: int) -> int:
         timeout_ms = get_settings().db_statement_timeout_ms
-
-        start_time = time.perf_counter()
+        rows_fetched = 0
         pool = self._get_pool()
         with pool.connection() as conn:
             # Explicitly use named cursor to avoid client-side caching of full result.
             with conn.cursor(name="pooled_sync_cursor") as cur:
                 apply_statement_timeout(cur, timeout_ms)
-                cur.execute(sql, (limit,))
-                while True:
-                    batch = cur.fetchmany(self.batch_size)
-                    if not batch:
-                        break
+                cur.execute(SELECT_RECORDS_SQL, (limit,))
+                for batch in fetch_in_batches(cur, self.batch_size):
                     rows_fetched += len(batch)
-        duration_seconds = time.perf_counter() - start_time
-        throughput_rows_per_sec = rows_fetched / duration_seconds if duration_seconds > 0 else 0.0
+        return rows_fetched
+
+    def execute(self, limit: int) -> StrategyResult:
+        rows, duration_seconds, throughput_rows_per_sec = run_timed(lambda: self._fetch_all(limit))
 
         return StrategyResult(
-            rows=rows_fetched,
+            rows=rows,
             duration_seconds=duration_seconds,
             throughput_rows_per_sec=throughput_rows_per_sec,
             peak_rss_bytes=None,
