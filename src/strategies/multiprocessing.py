@@ -92,10 +92,7 @@ class MultiprocessingStrategy(BenchmarkStrategy):
         Note: Duration is measured by orchestrator profiler to include
         process spawn overhead, ID selection, and result aggregation.
         """
-        if self._dsn_override:
-            dsn = self._dsn_override
-        else:
-            dsn = build_dsn()
+        dsn = self._dsn_override or build_dsn()
 
         timeout_ms = get_settings().db_statement_timeout_ms
         with psycopg.connect(dsn) as conn:

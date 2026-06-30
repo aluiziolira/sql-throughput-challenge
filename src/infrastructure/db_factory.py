@@ -85,6 +85,11 @@ def resolve_sync_connection(dsn_override: str | None) -> Connection:
     settings-derived DSN). An override (used by tests to point at a known
     DSN) connects directly without retry, since tests want immediate
     failure rather than a delayed retry loop.
+
+    Intended to be used as `with resolve_sync_connection(...) as conn:`.
+    psycopg3's `Connection.__exit__` commits (or rolls back, on exception)
+    *and* closes the connection as long as it isn't pool-owned - unlike
+    psycopg2, no separate `conn.close()` is needed.
     """
     if dsn_override:
         return psycopg.connect(dsn_override)
