@@ -136,6 +136,7 @@ def _build_table(is_aggregated: bool, title: str) -> Table:
     )
 
     table.add_column("Strategy", style="cyan", no_wrap=True)
+    table.add_column("Status", style="white", no_wrap=True)
     table.add_column("Rows", justify="right", style="magenta")
 
     if is_aggregated:
@@ -159,13 +160,26 @@ def _build_table(is_aggregated: bool, title: str) -> Table:
     return table
 
 
+def _status_label(res: dict[str, Any]) -> str:
+    """Render run status with error count when present."""
+    status = str(res.get("status") or "ok")
+    extra = res.get("extra") if isinstance(res.get("extra"), dict) else {}
+    error_count = extra.get("error_count") if isinstance(extra, dict) else None
+    if status == "ok":
+        return status
+    if isinstance(error_count, int) and error_count > 0:
+        return f"{status} ({error_count} err)"
+    return status
+
+
 def _format_aggregated_row(
     res: dict[str, Any],
-) -> tuple[str, str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, str, str]:
     """Format a single aggregated result row."""
     strategy = res.get("strategy", "Unknown")
     rows = f"{res.get('rows', 0):,}"
     runs = str(res.get("runs", 0))
+    status = _status_label(res)
 
     dur_median = res["duration_seconds"]["median"]
     dur_std = res["duration_seconds"]["stddev"]
@@ -185,12 +199,13 @@ def _format_aggregated_row(
         cpu = res["cpu_percent"]["median"]
         cpu_str = f"{cpu:.1f}"
 
-    return (strategy, rows, runs, duration_str, throughput_str, mem_str, cpu_str)
+    return (strategy, status, rows, runs, duration_str, throughput_str, mem_str, cpu_str)
 
 
-def _format_single_row(res: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+def _format_single_row(res: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
     """Format a single-run result row."""
     strategy = res.get("strategy", "Unknown")
+    status = _status_label(res)
     rows = f"{res.get('rows', 0):,}"
 
     duration = res.get("duration_seconds", 0.0)
@@ -206,7 +221,7 @@ def _format_single_row(res: dict[str, Any]) -> tuple[str, str, str, str, str, st
     cpu = res.get("cpu_percent") or 0.0
     cpu_str = f"{cpu:.1f}"
 
-    return (strategy, rows, duration_str, throughput_str, mem_str, cpu_str)
+    return (strategy, status, rows, duration_str, throughput_str, mem_str, cpu_str)
 
 
 def print_results(results: list[dict[str, Any]]) -> None:
@@ -246,12 +261,23 @@ def print_results(results: list[dict[str, Any]]) -> None:
 
     for res in sorted_results:
         if is_aggregated:
-            strategy, rows, runs, duration_str, throughput_str, mem_str, cpu_str = (
-                _format_aggregated_row(res)
+            (
+                strategy,
+                status,
+                rows,
+                runs,
+                duration_str,
+                throughput_str,
+                mem_str,
+                cpu_str,
+            ) = _format_aggregated_row(res)
+            table.add_row(
+                strategy, status, rows, runs, duration_str, throughput_str, mem_str, cpu_str
             )
-            table.add_row(strategy, rows, runs, duration_str, throughput_str, mem_str, cpu_str)
         else:
-            strategy, rows, duration_str, throughput_str, mem_str, cpu_str = _format_single_row(res)
-            table.add_row(strategy, rows, duration_str, throughput_str, mem_str, cpu_str)
+            strategy, status, rows, duration_str, throughput_str, mem_str, cpu_str = (
+                _format_single_row(res)
+            )
+            table.add_row(strategy, status, rows, duration_str, throughput_str, mem_str, cpu_str)
 
     console.print(table)

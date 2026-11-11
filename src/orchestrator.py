@@ -35,6 +35,7 @@ from src.utils.profiler import ProfileStats, profile_block
 log = get_logger(__name__)
 
 FailurePolicy = Literal["tolerant", "strict"]
+RunStatus = Literal["ok", "partial", "failed"]
 
 
 @dataclass
@@ -61,22 +62,120 @@ def _round_stats(stats: dict[str, Any], decimals: int = 2) -> dict[str, Any]:
     return {k: _round_float(v, decimals) if isinstance(v, float) else v for k, v in stats.items()}
 
 
+def _result_error_text(result: dict[str, Any]) -> str | None:
+    """Return a non-empty error string from a result, if present."""
+    error = result.get("error")
+    if error is None:
+        return None
+    text = str(error).strip()
+    return text or None
+
+
+def _error_count(result: dict[str, Any]) -> int:
+    """Count distinct failures recorded on a result."""
+    extra = result.get("extra")
+    if isinstance(extra, dict):
+        raw = extra.get("error_count")
+        if isinstance(raw, int) and raw >= 0:
+            return raw
+    return 1 if _result_error_text(result) else 0
+
+
+def classify_run_status(result: dict[str, Any]) -> RunStatus:
+    """
+    Classify a single run from rows + returned/raised error state.
+
+    - ok: no error
+    - partial: error present with some rows read
+    - failed: error present with zero rows read
+    """
+    if _result_error_text(result) is None:
+        return "ok"
+    rows = int(result.get("rows") or 0)
+    if rows > 0:
+        return "partial"
+    return "failed"
+
+
+def annotate_result_status(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach status + failure metadata for raised or returned worker errors."""
+    annotated = dict(result)
+    status = classify_run_status(annotated)
+    annotated["status"] = status
+
+    extra = dict(annotated.get("extra") or {})
+    error_count = _error_count(annotated)
+    if status == "ok":
+        extra.pop("failed", None)
+        extra.setdefault("error_count", 0)
+    else:
+        extra["failed"] = True
+        extra["error_count"] = error_count
+        if "failure_policy" not in extra:
+            extra["failure_policy"] = "tolerant"
+    annotated["extra"] = extra
+    return annotated
+
+
+def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a top-level summary of ok/partial/failed runs and error counts."""
+    status_counts = {"ok": 0, "partial": 0, "failed": 0}
+    error_count = 0
+    for result in results:
+        status = cast(RunStatus, result.get("status") or classify_run_status(result))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        error_count += _error_count(result)
+    return {
+        "status_counts": status_counts,
+        "error_count": error_count,
+        "has_failures": status_counts["failed"] > 0 or status_counts["partial"] > 0,
+    }
+
+
+def results_exit_code(results: list[dict[str, Any]]) -> int:
+    """Non-zero when any run is partial or failed."""
+    summary = summarize_results(results)
+    return 1 if summary["has_failures"] else 0
+
+
 def _aggregate_runs(run_results: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Aggregate multiple runs into statistical summary.
 
     Returns median, mean, and stddev for key metrics.
     All float values are rounded to 2 decimal places for readability.
+    Failed runs (zero rows with errors) are excluded from throughput/duration
+    aggregates when at least one measured run exists, so zeros do not masquerade
+    as a clean performance result. Status/error counts always include every run.
     """
+    annotated_runs = [annotate_result_status(dict(r)) for r in run_results]
+    measured_runs = [r for r in annotated_runs if r.get("status") != "failed"]
+    if not measured_runs:
+        measured_runs = annotated_runs
 
-    durations = [r["duration_seconds"] for r in run_results]
-    throughputs = [r["throughput_rows_per_sec"] for r in run_results]
+    durations = [r["duration_seconds"] for r in measured_runs]
+    throughputs = [r["throughput_rows_per_sec"] for r in measured_runs]
+    row_counts = [int(r.get("rows") or 0) for r in measured_runs]
 
     # Aggregate CPU and memory metrics
-    cpu_percents = [r.get("cpu_percent", 0.0) for r in run_results if r.get("cpu_percent")]
-    peak_rss_values = [r.get("peak_rss_bytes", 0) for r in run_results if r.get("peak_rss_bytes")]
+    cpu_percents = [r.get("cpu_percent", 0.0) for r in measured_runs if r.get("cpu_percent")]
+    peak_rss_values = [r.get("peak_rss_bytes", 0) for r in measured_runs if r.get("peak_rss_bytes")]
 
-    aggregated = {
+    status_counts = {"ok": 0, "partial": 0, "failed": 0}
+    total_errors = 0
+    for run in annotated_runs:
+        status = cast(RunStatus, run.get("status") or "ok")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        total_errors += _error_count(run)
+
+    if status_counts["failed"] and not status_counts["ok"] and not status_counts["partial"]:
+        aggregate_status: RunStatus = "failed"
+    elif status_counts["failed"] or status_counts["partial"]:
+        aggregate_status = "partial"
+    else:
+        aggregate_status = "ok"
+
+    aggregated: dict[str, Any] = {
         "duration_seconds": _round_stats(
             {
                 "median": statistics.median(durations),
@@ -95,8 +194,20 @@ def _aggregate_runs(run_results: list[dict[str, Any]]) -> dict[str, Any]:
                 "max": max(throughputs),
             }
         ),
-        "rows": run_results[0]["rows"],  # Should be same across all runs
+        # Median avoids privileging a single run when partial failures diverge.
+        "rows": int(statistics.median(row_counts)) if row_counts else 0,
+        "status": aggregate_status,
+        "extra": {
+            "failed": aggregate_status != "ok",
+            "error_count": total_errors,
+            "status_counts": status_counts,
+        },
     }
+    if total_errors:
+        error_messages = [
+            _result_error_text(run) for run in annotated_runs if _result_error_text(run)
+        ]
+        aggregated["error"] = "; ".join(cast(list[str], error_messages)[:3])
 
     # Add CPU statistics if available
     if cpu_percents:
@@ -198,13 +309,34 @@ def _profiled_execute(
     # Enable child process tracking for multiprocessing strategies
     track_children = strategy.name in _MULTIPROCESS_STRATEGIES
     with profile_block(strategy.name, track_children=track_children) as stats:
+        result: dict[str, Any]
         try:
-            result = strategy.execute(limit)
-            log.info(
-                "[STRATEGY SUCCESS] %s",
-                strategy.name,
-                extra={"strategy": strategy.name, "rows": result.get("rows")},
-            )
+            raw_result = strategy.execute(limit)
+            annotated = annotate_result_status(dict(raw_result))
+            if annotated["status"] != "ok" and failure_policy == "strict":
+                raise RuntimeError(
+                    _result_error_text(annotated) or f"{strategy.name} reported failure"
+                )
+            if annotated["status"] == "ok":
+                log.info(
+                    "[STRATEGY SUCCESS] %s",
+                    strategy.name,
+                    extra={"strategy": strategy.name, "rows": annotated.get("rows")},
+                )
+            else:
+                log.error(
+                    "[STRATEGY %s] %s",
+                    annotated["status"].upper(),
+                    strategy.name,
+                    extra={
+                        "strategy": strategy.name,
+                        "rows": annotated.get("rows"),
+                        "error": annotated.get("error"),
+                        "error_count": _error_count(annotated),
+                        "status": annotated["status"],
+                    },
+                )
+            result = annotated
         except Exception as exc:
             log.exception("[STRATEGY FAILED] %s", strategy.name, extra={"strategy": strategy.name})
             if failure_policy == "strict":
@@ -218,14 +350,15 @@ def _profiled_execute(
                     "failed": True,
                     "error_type": exc.__class__.__name__,
                     "failure_policy": failure_policy,
+                    "error_count": 1,
                 },
             }
-            result = failure_result
+            result = annotate_result_status(dict(failure_result))
 
     return _merge_result(result, stats)
 
 
-def _merge_result(result: StrategyResult, stats: ProfileStats) -> dict[str, Any]:
+def _merge_result(result: dict[str, Any], stats: ProfileStats) -> dict[str, Any]:
     """Merge strategy result with profiler stats, rounding floats for readability."""
     merged = dict(result)
     merged.setdefault("rows", 0)
@@ -244,7 +377,7 @@ def _merge_result(result: StrategyResult, stats: ProfileStats) -> dict[str, Any]
         "peak_rss_bytes": stats.peak_rss_bytes,
         "cpu_percent": _round_float(stats.cpu_percent, 1) if stats.cpu_percent else None,
     }
-    return merged
+    return annotate_result_status(merged)
 
 
 def _resolve_strategy_names(strategy_names: Iterable[str] | None) -> list[str]:
@@ -327,6 +460,8 @@ def _run_measurement_runs(
                 "rows": result.get("rows"),
                 "duration": result.get("duration_seconds"),
                 "throughput_rps": result.get("throughput_rows_per_sec"),
+                "status": result.get("status"),
+                "error_count": _error_count(result),
                 "global_run": current_run,
                 "total_global_runs": total_global_runs,
             },
@@ -355,6 +490,8 @@ def _combine_strategy_results(
         extra={
             "strategy": name,
             "runs": runs,
+            "status": aggregated.get("status"),
+            "error_count": _error_count(aggregated),
             "median_duration": aggregated["duration_seconds"]["median"],
             "median_throughput_rps": aggregated["throughput_rows_per_sec"]["median"],
             "stddev_duration": aggregated["duration_seconds"]["stddev"],
@@ -368,10 +505,12 @@ def _build_payload(
     names: list[str],
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    summary = summarize_results(results)
     return {
         "timestamp": datetime.now(UTC).isoformat(),
         "limit": effective_limit,
         "strategies": names,
+        "summary": summary,
         "results": results,
     }
 
@@ -425,10 +564,19 @@ def run_strategies(config: RunConfig) -> list[dict[str, Any]]:
     if config.persist:
         _persist_results(payload, Path(config.results_dir))
 
+    summary = payload["summary"]
     log.info(
-        "[ORCHESTRATOR COMPLETE] All %s strategy/strategies executed successfully",
+        "[ORCHESTRATOR COMPLETE] strategies=%s ok=%s partial=%s failed=%s errors=%s",
         len(names),
-        extra={"strategies": names, "total_strategies": len(names)},
+        summary["status_counts"]["ok"],
+        summary["status_counts"]["partial"],
+        summary["status_counts"]["failed"],
+        summary["error_count"],
+        extra={
+            "strategies": names,
+            "total_strategies": len(names),
+            "summary": summary,
+        },
     )
 
     return results
@@ -436,6 +584,10 @@ def run_strategies(config: RunConfig) -> list[dict[str, Any]]:
 
 __all__ = [
     "RunConfig",
+    "annotate_result_status",
     "available_strategies",
+    "classify_run_status",
+    "results_exit_code",
     "run_strategies",
+    "summarize_results",
 ]

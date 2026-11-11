@@ -6,7 +6,12 @@ import sys
 import typer
 
 from src.config import get_settings
-from src.orchestrator import RunConfig, available_strategies, run_strategies
+from src.orchestrator import (
+    RunConfig,
+    available_strategies,
+    results_exit_code,
+    run_strategies,
+)
 from src.reporter import print_results
 from src.utils.logging import configure_logging
 
@@ -90,6 +95,7 @@ def run(
         )
     )
     print_results(results)
+    raise typer.Exit(code=results_exit_code(results))
 
 
 def main() -> None:
