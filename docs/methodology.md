@@ -70,8 +70,16 @@ Strategy instances are created per warmup/measurement run and executed by the or
 
 Orchestrator execution supports a run-level failure policy via `RunConfig.failure_policy`:
 
-- `tolerant` (default): strategy execution exceptions are captured into the result payload (`error`, plus failure metadata under `extra`) so remaining runs/strategies continue.
-- `strict`: strategy execution exceptions are re-raised immediately (fail-fast), stopping execution at the first measurement failure.
+- `tolerant` (default): strategy execution exceptions **and returned worker/batch errors** are captured into the result payload (`error`, `status`, plus failure metadata under `extra`) so remaining runs/strategies continue.
+- `strict`: strategy execution exceptions and returned errors are raised immediately (fail-fast), stopping execution at the first measurement failure.
+
+Each run is classified as:
+
+- `ok` — no error
+- `partial` — error present with `rows > 0` (some workers/batches succeeded)
+- `failed` — error present with `rows == 0`
+
+Persisted artifacts include a top-level `summary` with status counts and `error_count`. The CLI exits non-zero when any result is `partial` or `failed`. Aggregation excludes pure failed zero-row runs from throughput medians when at least one measured run exists, so zeros do not masquerade as clean performance.
 
 The default remains `tolerant` for backward compatibility with existing CLI and benchmark workflows.
 
@@ -175,8 +183,9 @@ When `DB_STATEMENT_TIMEOUT_MS` is configured:
 
 - Each query within a strategy is subject to the timeout
 - Strategies with multiple queries (e.g., Multiprocessing with many chunks) may encounter timeouts on individual chunks while others succeed
-- In `tolerant` mode (default), timeout exceptions are captured in run results (`error` + failure metadata) so remaining runs/strategies continue
-- In `strict` mode, timeout exceptions are re-raised immediately and fail fast
+- In `tolerant` mode (default), timeout exceptions and returned worker errors are captured in run results (`error`, `status`, failure metadata) so remaining runs/strategies continue
+- In `strict` mode, timeout exceptions and returned errors are re-raised immediately and fail fast
+- Partial chunk completion (some workers succeed, others fail or time out) is reported as `partial` with rows read so far; successful chunk rows are counted once
 - For fair comparison, use the same timeout value (or disable timeouts) when comparing strategies
 
 These assumptions ensure that benchmark results reflect genuine architectural differences between strategies rather than data or configuration artifacts.
