@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 
 import asyncpg
 
@@ -20,6 +21,14 @@ from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 _CONCURRENT_ID_WINDOW_THRESHOLD = 50_000
 _CONCURRENT_ID_WINDOW_SIZE = 20_000
+
+
+@dataclass
+class _StreamOutcome:
+    """Rows read plus worker/batch errors for partial-run accounting."""
+
+    rows: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 def _split_limit_ranges(limit: int, concurrency: int) -> list[tuple[int, int]]:
@@ -45,6 +54,28 @@ def _split_limit_ranges(limit: int, concurrency: int) -> list[tuple[int, int]]:
         start_idx = end_idx
 
     return ranges
+
+
+def _merge_task_outcomes(results: list[object]) -> _StreamOutcome:
+    """
+    Merge gather outcomes without double-counting.
+
+    Successful ints add to rows; exceptions become errors and contribute 0 rows.
+    """
+    outcome = _StreamOutcome()
+    for result in results:
+        if isinstance(result, BaseException):
+            outcome.errors.append(f"{result.__class__.__name__}: {result}")
+            continue
+        if isinstance(result, _StreamOutcome):
+            outcome.rows += result.rows
+            outcome.errors.extend(result.errors)
+            continue
+        if isinstance(result, int):
+            outcome.rows += result
+            continue
+        outcome.errors.append(f"Unexpected worker result type: {type(result)!r}")
+    return outcome
 
 
 class AsyncStreamStrategy(BenchmarkStrategy):
@@ -75,23 +106,125 @@ class AsyncStreamStrategy(BenchmarkStrategy):
         self.concurrency = concurrency
         self._dsn_override = dsn_override
 
-    async def _stream_concurrent(self, limit: int) -> int:
+    async def _fetch_id_chunk(
+        self,
+        pool: asyncpg.Pool,
+        selected_ids: list[int],
+        start_idx: int,
+        end_idx: int,
+        timeout_ms: int,
+    ) -> int:
+        chunk_ids = selected_ids[start_idx:end_idx]
+        if not chunk_ids:
+            return 0
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await async_apply_statement_timeout(conn, timeout_ms)
+                cursor = await conn.cursor(
+                    "SELECT * FROM public.records WHERE id = ANY($1) ORDER BY id",
+                    chunk_ids,
+                )
+                count = 0
+                while True:
+                    batch = await cursor.fetch(self.batch_size)
+                    if not batch:
+                        break
+                    count += len(batch)
+                return count
+
+    async def _process_selected_ids(
+        self,
+        pool: asyncpg.Pool,
+        ids: list[int],
+        effective_concurrency: int,
+        timeout_ms: int,
+    ) -> _StreamOutcome:
+        if not ids:
+            return _StreamOutcome()
+        ranges = _split_limit_ranges(len(ids), effective_concurrency)
+        tasks = [
+            self._fetch_id_chunk(pool, ids, start_idx, end_idx, timeout_ms)
+            for start_idx, end_idx in ranges
+        ]
+        # return_exceptions keeps successful chunk counts when a peer fails.
+        raw_results: list[object] = list(await asyncio.gather(*tasks, return_exceptions=True))
+        return _merge_task_outcomes(raw_results)
+
+    async def _select_ids_full(self, pool: asyncpg.Pool, limit: int, timeout_ms: int) -> list[int]:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await async_apply_statement_timeout(conn, timeout_ms)
+                rows = await conn.fetch("SELECT id FROM public.records ORDER BY id LIMIT $1", limit)
+        return [row["id"] for row in rows]
+
+    async def _select_ids_window(
+        self,
+        pool: asyncpg.Pool,
+        last_selected_id: int | None,
+        window_limit: int,
+        timeout_ms: int,
+    ) -> list[int]:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await async_apply_statement_timeout(conn, timeout_ms)
+                rows = await conn.fetch(
+                    (
+                        "SELECT id FROM public.records "
+                        "WHERE ($1::bigint IS NULL OR id > $1) "
+                        "ORDER BY id LIMIT $2"
+                    ),
+                    last_selected_id,
+                    window_limit,
+                )
+        return [row["id"] for row in rows]
+
+    async def _stream_windowed(
+        self,
+        pool: asyncpg.Pool,
+        limit: int,
+        effective_concurrency: int,
+        timeout_ms: int,
+    ) -> _StreamOutcome:
+        outcome = _StreamOutcome()
+        remaining = limit
+        last_selected_id: int | None = None
+
+        while remaining > 0:
+            window_limit = min(_CONCURRENT_ID_WINDOW_SIZE, remaining)
+            window_ids = await self._select_ids_window(
+                pool, last_selected_id, window_limit, timeout_ms
+            )
+            if not window_ids:
+                break
+
+            window_outcome = await self._process_selected_ids(
+                pool, window_ids, effective_concurrency, timeout_ms
+            )
+            outcome.rows += window_outcome.rows
+            outcome.errors.extend(window_outcome.errors)
+            remaining -= len(window_ids)
+            last_selected_id = window_ids[-1]
+
+        return outcome
+
+    async def _stream_concurrent(self, limit: int) -> _StreamOutcome:
         """
         Stream with multiple concurrent cursors.
 
         Splits work into N ranges and fetches concurrently using connection pool.
+        Worker failures are collected so partial row progress is preserved.
         """
         if limit <= 0:
-            return 0
+            return _StreamOutcome()
 
         settings = get_settings()
         dsn = self._dsn_override or build_dsn()
+        timeout_ms = settings.db_statement_timeout_ms
 
         effective_concurrency = max(1, min(self.concurrency, limit))
         if effective_concurrency <= 1:
             return await self._stream(limit)
 
-        # Create async pool for concurrent connections
         pool = await asyncpg.create_pool(
             dsn,
             min_size=1,
@@ -99,79 +232,16 @@ class AsyncStreamStrategy(BenchmarkStrategy):
         )
 
         try:
-
-            async def fetch_range(selected_ids: list[int], start_idx: int, end_idx: int) -> int:
-                chunk_ids = selected_ids[start_idx:end_idx]
-                if not chunk_ids:
-                    return 0
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        await async_apply_statement_timeout(conn, settings.db_statement_timeout_ms)
-                        cursor = await conn.cursor(
-                            "SELECT * FROM public.records WHERE id = ANY($1) ORDER BY id",
-                            chunk_ids,
-                        )
-                        count = 0
-                        while True:
-                            batch = await cursor.fetch(self.batch_size)
-                            if not batch:
-                                break
-                            count += len(batch)
-                        return count
-
-            async def process_selected_ids(ids: list[int]) -> int:
-                if not ids:
-                    return 0
-                ranges = _split_limit_ranges(len(ids), effective_concurrency)
-                tasks = [fetch_range(ids, start_idx, end_idx) for start_idx, end_idx in ranges]
-                counts = await asyncio.gather(*tasks)
-                return sum(counts)
-
-            # Preserve existing behavior for small/medium limits.
             if limit <= _CONCURRENT_ID_WINDOW_THRESHOLD:
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        await async_apply_statement_timeout(conn, settings.db_statement_timeout_ms)
-                        rows = await conn.fetch(
-                            "SELECT id FROM public.records ORDER BY id LIMIT $1", limit
-                        )
-                ids = [row["id"] for row in rows]
-                return await process_selected_ids(ids)
-
-            # Guardrail path for large limits: bound in-memory IDs via windowed selection.
-            rows_read = 0
-            remaining = limit
-            last_selected_id: int | None = None
-
-            while remaining > 0:
-                window_limit = min(_CONCURRENT_ID_WINDOW_SIZE, remaining)
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        await async_apply_statement_timeout(conn, settings.db_statement_timeout_ms)
-                        rows = await conn.fetch(
-                            (
-                                "SELECT id FROM public.records "
-                                "WHERE ($1::bigint IS NULL OR id > $1) "
-                                "ORDER BY id LIMIT $2"
-                            ),
-                            last_selected_id,
-                            window_limit,
-                        )
-
-                window_ids = [row["id"] for row in rows]
-                if not window_ids:
-                    break
-
-                rows_read += await process_selected_ids(window_ids)
-                remaining -= len(window_ids)
-                last_selected_id = window_ids[-1]
-
-            return rows_read
-
+                ids = await self._select_ids_full(pool, limit, timeout_ms)
+                return await self._process_selected_ids(
+                    pool, ids, effective_concurrency, timeout_ms
+                )
+            return await self._stream_windowed(pool, limit, effective_concurrency, timeout_ms)
         finally:
             await pool.close()
 
-    async def _stream(self, limit: int) -> int:
+    async def _stream(self, limit: int) -> _StreamOutcome:
         """
         Stream rows in batches and return the count.
         """
@@ -193,10 +263,10 @@ class AsyncStreamStrategy(BenchmarkStrategy):
                         break
                     rows_read += len(batch)
         finally:
-            if conn:
+            if conn is not None:
                 await conn.close()
 
-        return rows_read
+        return _StreamOutcome(rows=rows_read)
 
     def execute(self, limit: int) -> StrategyResult:
         """
@@ -228,18 +298,25 @@ class AsyncStreamStrategy(BenchmarkStrategy):
         """
         start_time = time.perf_counter()
         if self.concurrency > 1:
-            rows_read = await self._stream_concurrent(limit)
+            outcome = await self._stream_concurrent(limit)
         else:
-            rows_read = await self._stream(limit)
+            outcome = await self._stream(limit)
         duration_seconds = time.perf_counter() - start_time
-        throughput_rows_per_sec = rows_read / duration_seconds if duration_seconds > 0 else 0.0
+        throughput_rows_per_sec = outcome.rows / duration_seconds if duration_seconds > 0 else 0.0
+
+        error_text = "; ".join(outcome.errors[:3]) if outcome.errors else None
+        notes = f"asyncpg batch_size={self.batch_size} concurrency={self.concurrency}"
+        if outcome.errors:
+            notes += f", errors={len(outcome.errors)}"
 
         return StrategyResult(
-            rows=rows_read,
+            rows=outcome.rows,
             duration_seconds=duration_seconds,
             throughput_rows_per_sec=throughput_rows_per_sec,
             peak_rss_bytes=None,
-            notes=f"asyncpg batch_size={self.batch_size} concurrency={self.concurrency}",
+            notes=notes,
+            error=error_text,
+            extra={"error_count": len(outcome.errors)},
         )
 
 

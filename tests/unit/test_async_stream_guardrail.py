@@ -118,9 +118,10 @@ async def test_stream_concurrent_preserves_full_id_prefetch_for_small_limits(
     )
 
     strategy = AsyncStreamStrategy(batch_size=3, concurrency=3, dsn_override="postgresql://test")
-    rows_read = await strategy._stream_concurrent(limit=SMALL_LIMIT)
+    outcome = await strategy._stream_concurrent(limit=SMALL_LIMIT)
 
-    assert rows_read == SMALL_LIMIT
+    assert outcome.rows == SMALL_LIMIT
+    assert outcome.errors == []
     assert fake_pool.closed is True
     assert fake_pool.conn.fetch_calls == [("full", SMALL_LIMIT)]
 
@@ -154,9 +155,10 @@ async def test_stream_concurrent_uses_bounded_id_windows_for_large_limits(
     )
 
     strategy = AsyncStreamStrategy(batch_size=2, concurrency=3, dsn_override="postgresql://test")
-    rows_read = await strategy._stream_concurrent(limit=LARGE_LIMIT)
+    outcome = await strategy._stream_concurrent(limit=LARGE_LIMIT)
 
-    assert rows_read == LARGE_LIMIT
+    assert outcome.rows == LARGE_LIMIT
+    assert outcome.errors == []
     assert fake_pool.closed is True
     assert fake_pool.conn.fetch_calls == [
         ("window", None, 3),
