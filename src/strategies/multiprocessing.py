@@ -18,7 +18,11 @@ from functools import partial
 import psycopg
 
 from src.config import get_settings
-from src.infrastructure.db_factory import build_dsn, fetch_in_batches
+from src.infrastructure.db_factory import (
+    apply_statement_timeout,
+    build_dsn,
+    fetch_in_batches,
+)
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
 
 _WORKER_POOL_TIMEOUT_SECONDS = 600
@@ -52,9 +56,8 @@ def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | No
 
         sql = "SELECT * FROM public.records WHERE id = ANY(%s) ORDER BY id;"
         with psycopg.connect(dsn) as conn:
+            apply_statement_timeout(conn, timeout_ms)
             with conn.cursor(name=f"mp_worker_{work.ids[0]}") as cur:
-                if timeout_ms > 0:
-                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
                 cur.execute(sql, (work.ids,))
 
                 # Stream instead of fetchall to reduce per-worker memory
@@ -139,15 +142,24 @@ class MultiprocessingStrategy(BenchmarkStrategy):
         elif stats.timed_out:
             error_text = f"{error_text}; {timeout_message}"
 
+        incomplete = stats.total_chunks - stats.completed_chunks if stats.timed_out else 0
+        error_count = (
+            len(stats.errors) + (stats.total_chunks - stats.completed_chunks)
+            if stats.timed_out
+            else len(stats.errors)
+        )
+
         return StrategyResult(
             rows=stats.rows_read,
             peak_rss_bytes=None,  # Cannot measure worker memory from main process
             notes=notes,
             error=error_text,
             extra={
-                "error_count": len(stats.errors) + (1 if stats.timed_out else 0),
+                "error_count": error_count,
                 "chunks_completed": stats.completed_chunks,
                 "chunks_total": stats.total_chunks,
+                "chunks_failed": len(stats.errors),
+                "chunks_incomplete": incomplete,
                 "timed_out": stats.timed_out,
             },
         )
@@ -163,9 +175,8 @@ class MultiprocessingStrategy(BenchmarkStrategy):
 
         timeout_ms = get_settings().db_statement_timeout_ms
         with psycopg.connect(dsn) as conn:
+            apply_statement_timeout(conn, timeout_ms)
             with conn.cursor() as cur:
-                if timeout_ms > 0:
-                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
                 cur.execute("SELECT id FROM public.records ORDER BY id LIMIT %s;", (limit,))
                 ids = [row[0] for row in cur.fetchall()]
 
@@ -179,6 +190,8 @@ class MultiprocessingStrategy(BenchmarkStrategy):
                     "error_count": 0,
                     "chunks_completed": 0,
                     "chunks_total": 0,
+                    "chunks_failed": 0,
+                    "chunks_incomplete": 0,
                     "timed_out": False,
                 },
             )

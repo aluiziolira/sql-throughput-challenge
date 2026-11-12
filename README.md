@@ -30,11 +30,11 @@ What it does:
 
 1. Builds the benchmark image and starts Postgres with the Compose resource caps in `docker-compose.benchmark.yml`.
 2. Seeds `ROWS` deterministic records.
-3. Runs every strategy `RUNS` times (median/mean/stddev aggregation).
-4. Prints a status-aware results table to the console.
-5. Writes `results/latest.json` and a timestamped `results/run-<UTC>.json` artifact with per-run metrics, `status` (`ok` / `partial` / `failed`), and a top-level `summary` (status counts + error count).
+3. Runs every strategy `RUNS` times (aggregates duration, throughput, rows, CPU, and RSS statistics from `ok` runs, falling back to `partial` or all runs).
+4. Prints a status-aware results table to the console (including completed results if interrupted).
+5. Writes `results/latest.json` and a timestamped `results/run-<UTC>.json` artifact with per-run metrics, `status` (`ok` / `partial` / `failed`), and a top-level `summary` (status counts, error count, and run completion metadata).
 
-Non-zero CLI exit status means at least one run was `partial` or `failed`.
+CLI exit status: `0` when all runs are `ok`, `1` when any run is `partial` or `failed`, and `130` when interrupted (Ctrl-C).
 
 Same harness without Compose (local Postgres + Poetry):
 
@@ -56,15 +56,7 @@ poetry run python scripts/generate_data.py --rows 10000
 poetry run python -m src.main run --strategy all --rows 10000 --runs 3
 ```
 
-Environment note: PostgreSQL 16 on localhost (no Docker CPU/RAM caps), Python 3.12, 4 vCPU (`Intel Xeon`), ~16 GB RAM host. Numbers below are medians from that exact command; they are not comparable to the containerized historical table.
-
-| Strategy | 10K rows/s (median) | Peak RSS (MB, median) | Status |
-| --- | ---: | ---: | --- |
-| **Naive** | 38,462 | 99 | ok |
-| **Async Stream** | 31,250 | 69 | ok |
-| **Cursor Pagination** | 31,250 | 98 | ok |
-| **Pooled Sync** | 30,303 | 100 | ok |
-| **Multiprocessing** | 28,571 | 340 | ok |
+No locally measured figures are published in this PR; to produce current numbers run the reproducible command and read `results/latest.json` (and commit the generated `results/run-<UTC>.json` next to any figure you publish).
 
 ### Historical containerized evidence (100K / 500K / 1M)
 
@@ -118,6 +110,8 @@ Python/backend best practices are built into execution quality: strict static ty
 - **Localhost / container network:** Host-local or Compose networking minimizes WAN latency, so results emphasize driver/decode cost over wide-area I/O.
 - **Read-only single table:** No write contention, locking, or multi-table `JOIN` cost is measured.
 - **Multiprocessing ID prefetch:** The multiprocessing path still materializes the selected ID list in the parent before chunk fan-out; async concurrent mode windows large ID sets, but multiprocessing does not yet.
+- **Naive all-or-nothing:** `naive` uses `fetchall()` and is therefore all-or-nothing; any failure yields no partial rows.
+- **Interrupted in-flight runs:** When a run is interrupted (Ctrl-C), rows read so far by the in-flight run are unknown and recorded as 0 (`failed` with `extra.interrupted=true`).
 - **Partial failure semantics:** Worker/batch errors are counted into `status` + `summary.error_count` and fail the process exit code, but tolerant mode continues remaining strategies/runs by design.
 - **Host variance:** Throughput and RSS depend on CPU count, memory pressure, and Postgres tuning; compare runs only under the same command and resource envelope.
 - **Statistical depth:** Default publishable comparisons should use several runs (`RUNS=3` minimum; more is better) plus optional `--warmup`.

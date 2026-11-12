@@ -37,16 +37,16 @@ def build_dsn() -> str:
     )
 
 
-def apply_statement_timeout(cursor: psycopg.Cursor, timeout_ms: int) -> None:
+def apply_statement_timeout(conn: Connection[Any], timeout_ms: int) -> None:
     """Apply transaction-local statement timeout for sync psycopg usage."""
     if timeout_ms > 0:
-        cursor.execute("SET LOCAL statement_timeout = %s", (timeout_ms,))
+        conn.execute("SELECT set_config('statement_timeout', %s, true)", (str(timeout_ms),))
 
 
 async def async_apply_statement_timeout(conn: Any, timeout_ms: int) -> None:
     """Apply transaction-local statement timeout for asyncpg usage."""
     if timeout_ms > 0:
-        await conn.execute("SET LOCAL statement_timeout = $1", timeout_ms)
+        await conn.execute("SELECT set_config('statement_timeout', $1, true)", str(timeout_ms))
 
 
 # Tenacity provides production resilience for transient connection failures.

@@ -33,7 +33,7 @@ The project uses a custom profiler (`src/utils/profiler.py`) designed to catch t
 
 ### Metrics Captured
 
-1. **Wall-Clock Duration:** `time.perf_counter()` (nanosecond precision).
+1. **Wall-Clock Duration:** `time.perf_counter()` (nanosecond precision). Throughput is computed from the unrounded profiler duration (duration is rounded only for display).
 2. **Peak RSS (OS Memory):**
     - Measured via a **daemon thread** polling `psutil.Process.memory_info()` every **50ms**.
     - *Why:* Batch processing creates "sawtooth" memory patterns. Snapshotting at the end often reports the "low" point (after GC), missing the true peak.
@@ -47,6 +47,8 @@ Single runs are noisy due to OS scheduling and JIT warmups. We employ:
 - **Median** (primary metric) to filter outliers.
 - **Standard Deviation** to detect stability issues.
 - **Warmup Runs** (optional via `--warmup`) to prime OS page cache and Postgres shared buffers.
+
+For multi-run aggregation, duration, throughput, rows, CPU, and RSS statistics come from `ok` runs when any exist, otherwise from `partial` runs, otherwise from all runs. Metadata fields `extra.measured_status` and `extra.measured_runs` record which set was used. The `status_counts` and `error_count` always include every run.
 
 ### Statistical Caveats
 
@@ -73,15 +75,42 @@ Orchestrator execution supports a run-level failure policy via `RunConfig.failur
 - `tolerant` (default): strategy execution exceptions **and returned worker/batch errors** are captured into the result payload (`error`, `status`, plus failure metadata under `extra`) so remaining runs/strategies continue.
 - `strict`: strategy execution exceptions and returned errors are raised immediately (fail-fast), stopping execution at the first measurement failure.
 
-Each run is classified as:
+The default remains `tolerant` for backward compatibility with existing CLI and benchmark workflows.
+
+#### Run Status Classification
+
+A run has an error if it has error text OR `extra.error_count > 0`. Each run is classified as:
 
 - `ok` — no error
 - `partial` — error present with `rows > 0` (some workers/batches succeeded)
 - `failed` — error present with `rows == 0`
 
-Persisted artifacts include a top-level `summary` with status counts and `error_count`. The CLI exits non-zero when any result is `partial` or `failed`. Aggregation excludes pure failed zero-row runs from throughput medians when at least one measured run exists, so zeros do not masquerade as clean performance.
+Non-ok runs always count at least 1 error. Persisted artifacts include a top-level `summary` with status counts and `error_count`.
 
-The default remains `tolerant` for backward compatibility with existing CLI and benchmark workflows.
+#### Strategy Partial Progress Semantics
+
+When errors occur during data fetching:
+
+- `async_stream` keeps rows from completed windows/batches when a later window or batch fails.
+- `cursor_pagination` and `pooled_sync` return rows read so far with an error when a failure happens after at least one row (zero rows -> raised error -> failed).
+- `naive` is `fetchall` and therefore all-or-nothing (no partial rows).
+
+#### Interrupted Runs (Ctrl-C)
+
+When execution is interrupted via Ctrl-C (SIGINT):
+
+- The in-flight run is recorded as `failed` with `extra.interrupted=true` (and rows recorded as 0).
+- If the interrupt happens during warmup (before the first measured run of that strategy), results already collected are still persisted and the summary is marked interrupted; no in-flight result is recorded.
+- Remaining strategies are skipped.
+- The artifact is still written with `summary.interrupted=true` plus `summary.planned_runs` and `summary.completed_runs`.
+- Completed results are printed to the console.
+- The CLI exits `130`.
+
+#### Exit Codes
+
+- `0`: all runs completed with `ok` status.
+- `1`: any run resulted in `partial` or `failed` status.
+- `130`: execution was interrupted (Ctrl-C).
 
 ---
 
@@ -113,6 +142,7 @@ This section defines the precise drivers, libraries, and SQL commands used by ea
 - **Partitioning:** ID chunking based on `SELECT id ... ORDER BY id LIMIT N`.
   - *Why:* Avoids `OFFSET` scans and does not assume contiguous IDs. Each worker fetches `WHERE id = ANY(...)` over its chunk.
 - **Process Model:** Uses `spawn` instead of `fork` for thread safety and cross-platform compatibility (Windows/macOS), keeping interactions isolated.
+- **Timeout & Error Accounting:** `error_count` = failed chunks + chunks not completed before the deadline; `extra.chunks_failed` and `extra.chunks_incomplete` are reported.
 
 ### Async Stream
 
@@ -125,7 +155,7 @@ This section defines the precise drivers, libraries, and SQL commands used by ea
 
 ### Statement Timeouts
 
-- **Mechanism:** Optional `SET LOCAL statement_timeout = <ms>` per transaction.
+- **Mechanism:** Applied with transaction-local `set_config('statement_timeout', ..., true)` on the connection (SET cannot take bind parameters).
 - **Control:** Configure via `DB_STATEMENT_TIMEOUT_MS` (0 disables).
 
 ---
@@ -181,8 +211,10 @@ The **Multiprocessing** strategy uses ID-based chunking rather than range assump
 
 When `DB_STATEMENT_TIMEOUT_MS` is configured:
 
+- Statement timeout is applied with transaction-local `set_config('statement_timeout', ..., true)` on the connection (SET cannot take bind parameters)
 - Each query within a strategy is subject to the timeout
 - Strategies with multiple queries (e.g., Multiprocessing with many chunks) may encounter timeouts on individual chunks while others succeed
+- For Multiprocessing timeouts, `error_count` = failed chunks + chunks not completed before the deadline; `extra.chunks_failed` and `extra.chunks_incomplete` are reported
 - In `tolerant` mode (default), timeout exceptions and returned worker errors are captured in run results (`error`, `status`, failure metadata) so remaining runs/strategies continue
 - In `strict` mode, timeout exceptions and returned errors are re-raised immediately and fail fast
 - Partial chunk completion (some workers succeed, others fail or time out) is reported as `partial` with rows read so far; successful chunk rows are counted once

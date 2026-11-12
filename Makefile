@@ -107,9 +107,11 @@ benchmark: ## Run containerized benchmark (recommended)
 		--rows $(ROWS) \
 		--runs $(RUNS) \
 		$(if $(CONCURRENCY),--concurrency $(CONCURRENCY)) \
-		$(if $(WARMUP),--warmup)
-	@echo "$(BOLD)Cleaning up benchmark resources...$(RESET)"
-	$(COMPOSE_BENCHMARK) down
+		$(if $(WARMUP),--warmup); \
+	status=$$?; \
+	echo "$(BOLD)Cleaning up benchmark resources...$(RESET)"; \
+	$(COMPOSE_BENCHMARK) down; \
+	exit $$status
 
 # =============================================================================
 # Infrastructure

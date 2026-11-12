@@ -19,9 +19,17 @@ DEFAULT_LIMIT = 10
 RETURNED_ERROR_COUNT = 2
 PARTIAL_ROWS = 4
 AGG_ERROR_COUNT = 2
-AGG_MEDIAN_THROUGHPUT = 70.0
-AGG_MEDIAN_ROWS = 90
+AGG_MEDIAN_THROUGHPUT = 100.0
+AGG_MEDIAN_ROWS = 100
 SUMMARY_ERROR_COUNT = 3
+TEST_ROWS_FIVE = 5
+TEST_ERROR_COUNT_TWO = 2
+PARTIAL_ONLY_ROWS_A = 80
+PARTIAL_ONLY_ROWS_B = 60
+PARTIAL_ONLY_MEDIAN_ROWS = 70
+PARTIAL_ONLY_THROUGHPUT_MEDIAN = 50.0
+PARTIAL_ONLY_TOTAL_ERRORS = 3
+PARTIAL_ONLY_MEASURED_RUNS = 2
 
 
 class _ReturnedErrorStrategy:
@@ -84,6 +92,36 @@ def test_annotate_result_status_surfaces_returned_errors() -> None:
     assert annotated["status"] == "partial"
     assert annotated["extra"]["failed"] is True
     assert annotated["extra"]["error_count"] == RETURNED_ERROR_COUNT
+
+
+def test_error_count_without_message_classified_as_error_and_annotated() -> None:
+    raw = {"rows": TEST_ROWS_FIVE, "error": None, "extra": {"error_count": TEST_ERROR_COUNT_TWO}}
+    assert classify_run_status(raw) == "partial"
+    annotated = annotate_result_status(raw)
+    assert annotated["status"] == "partial"
+    assert annotated["extra"]["failed"] is True
+    assert annotated["extra"]["error_count"] == TEST_ERROR_COUNT_TWO
+    assert "2 worker error(s) reported without message" in str(annotated["error"])
+    summary = summarize_results([annotated])
+    assert summary["status_counts"]["partial"] == 1
+    assert summary["error_count"] == TEST_ERROR_COUNT_TWO
+    assert summary["has_failures"] is True
+    assert results_exit_code([annotated]) == 1
+
+
+def test_zero_error_count_with_message_forces_error_count_at_least_one() -> None:
+    raw = {"rows": 0, "error": "boom", "extra": {"error_count": 0}}
+    assert classify_run_status(raw) == "failed"
+    annotated = annotate_result_status(raw)
+    assert annotated["status"] == "failed"
+    assert annotated["extra"]["failed"] is True
+    assert annotated["extra"]["error_count"] == 1
+    assert annotated["error"] == "boom"
+    summary = summarize_results([annotated])
+    assert summary["status_counts"]["failed"] == 1
+    assert summary["error_count"] == 1
+    assert summary["has_failures"] is True
+    assert results_exit_code([annotated]) == 1
 
 
 def test_run_strategies_counts_returned_worker_errors_in_summary_and_exit_code(
@@ -187,9 +225,49 @@ def test_aggregate_runs_marks_partial_and_excludes_failed_zeros_from_throughput(
     assert aggregated["extra"]["status_counts"]["ok"] == 1
     assert aggregated["extra"]["status_counts"]["failed"] == 1
     assert aggregated["extra"]["status_counts"]["partial"] == 1
+    assert aggregated["extra"]["measured_status"] == "ok"
+    assert aggregated["extra"]["measured_runs"] == 1
     # Failed zero-throughput run excluded from median when measured runs exist.
     assert aggregated["throughput_rows_per_sec"]["median"] == AGG_MEDIAN_THROUGHPUT
     assert aggregated["rows"] == AGG_MEDIAN_ROWS
+
+
+def test_aggregate_runs_with_only_partial_and_failed_runs() -> None:
+    aggregated = orchestrator._aggregate_runs(
+        [
+            {
+                "rows": PARTIAL_ONLY_ROWS_A,
+                "duration_seconds": 2.0,
+                "throughput_rows_per_sec": 40.0,
+                "error": "partial 1",
+                "extra": {"error_count": 1},
+            },
+            {
+                "rows": PARTIAL_ONLY_ROWS_B,
+                "duration_seconds": 1.0,
+                "throughput_rows_per_sec": 60.0,
+                "error": "partial 2",
+                "extra": {"error_count": 1},
+            },
+            {
+                "rows": 0,
+                "duration_seconds": 0.5,
+                "throughput_rows_per_sec": 0.0,
+                "error": "failed run",
+                "extra": {"error_count": 1},
+            },
+        ]
+    )
+
+    assert aggregated["status"] == "partial"
+    assert aggregated["extra"]["error_count"] == PARTIAL_ONLY_TOTAL_ERRORS
+    assert aggregated["extra"]["status_counts"]["ok"] == 0
+    assert aggregated["extra"]["status_counts"]["failed"] == 1
+    assert aggregated["extra"]["status_counts"]["partial"] == PARTIAL_ONLY_MEASURED_RUNS
+    assert aggregated["extra"]["measured_status"] == "partial"
+    assert aggregated["extra"]["measured_runs"] == PARTIAL_ONLY_MEASURED_RUNS
+    assert aggregated["throughput_rows_per_sec"]["median"] == PARTIAL_ONLY_THROUGHPUT_MEDIAN
+    assert aggregated["rows"] == PARTIAL_ONLY_MEDIAN_ROWS
 
 
 def test_summarize_results_and_exit_code() -> None:

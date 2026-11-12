@@ -7,6 +7,7 @@ import typer
 
 from src.config import get_settings
 from src.orchestrator import (
+    BenchmarkInterrupted,
     RunConfig,
     available_strategies,
     results_exit_code,
@@ -84,16 +85,23 @@ def run(
         f"warmup={warmup}, runs={runs})."
     )
 
-    results = run_strategies(
-        RunConfig(
-            strategy_names=strategy_names,
-            limit=total_rows,
-            persist=True,
-            warmup=warmup,
-            runs=runs,
-            concurrency=concurrency,
+    try:
+        results = run_strategies(
+            RunConfig(
+                strategy_names=strategy_names,
+                limit=total_rows,
+                persist=True,
+                warmup=warmup,
+                runs=runs,
+                concurrency=concurrency,
+            )
         )
-    )
+    except BenchmarkInterrupted as exc:
+        if exc.results:
+            print_results(exc.results)
+        typer.echo("Partial artifact written to results/latest.json")
+        raise typer.Exit(code=130) from exc
+
     print_results(results)
     raise typer.Exit(code=results_exit_code(results))
 

@@ -191,9 +191,16 @@ class AsyncStreamStrategy(BenchmarkStrategy):
 
         while remaining > 0:
             window_limit = min(_CONCURRENT_ID_WINDOW_SIZE, remaining)
-            window_ids = await self._select_ids_window(
-                pool, last_selected_id, window_limit, timeout_ms
-            )
+            try:
+                window_ids = await self._select_ids_window(
+                    pool, last_selected_id, window_limit, timeout_ms
+                )
+            except Exception as exc:
+                outcome.errors.append(
+                    f"id window after id={last_selected_id}: {type(exc).__name__}: {exc}"
+                )
+                break
+
             if not window_ids:
                 break
 
@@ -249,9 +256,9 @@ class AsyncStreamStrategy(BenchmarkStrategy):
         dsn = self._dsn_override or build_dsn()
 
         rows_read = 0
-        conn = None
+        errors: list[str] = []
+        conn = await asyncpg.connect(dsn)
         try:
-            conn = await asyncpg.connect(dsn)
             async with conn.transaction():
                 await async_apply_statement_timeout(conn, settings.db_statement_timeout_ms)
                 cursor = await conn.cursor(
@@ -262,11 +269,12 @@ class AsyncStreamStrategy(BenchmarkStrategy):
                     if not batch:
                         break
                     rows_read += len(batch)
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
         finally:
-            if conn is not None:
-                await conn.close()
+            await conn.close()
 
-        return _StreamOutcome(rows=rows_read)
+        return _StreamOutcome(rows=rows_read, errors=errors)
 
     def execute(self, limit: int) -> StrategyResult:
         """

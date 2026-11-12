@@ -34,10 +34,11 @@ class NaiveStrategy(BenchmarkStrategy):
 
     def _fetch_all(self, limit: int) -> int:
         timeout_ms = get_settings().db_statement_timeout_ms
-        with resolve_sync_connection(self._dsn_override) as conn, conn.cursor() as cur:
-            apply_statement_timeout(cur, timeout_ms)
-            cur.execute(SELECT_RECORDS_SQL, (limit,))
-            return len(cur.fetchall())
+        with resolve_sync_connection(self._dsn_override) as conn:
+            apply_statement_timeout(conn, timeout_ms)
+            with conn.cursor() as cur:
+                cur.execute(SELECT_RECORDS_SQL, (limit,))
+                return len(cur.fetchall())
 
     def execute(self, limit: int) -> StrategyResult:
         """
