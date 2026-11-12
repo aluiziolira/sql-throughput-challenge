@@ -10,6 +10,7 @@ Intent:
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -17,13 +18,29 @@ from functools import partial
 import psycopg
 
 from src.config import get_settings
-from src.infrastructure.db_factory import build_dsn, fetch_in_batches
+from src.infrastructure.db_factory import (
+    apply_statement_timeout,
+    build_dsn,
+    fetch_in_batches,
+)
 from src.strategies.abstract import BenchmarkStrategy, StrategyResult
+
+_WORKER_POOL_TIMEOUT_SECONDS = 600
 
 
 @dataclass(frozen=True)
 class WorkItem:
     ids: list[int]
+
+
+@dataclass(frozen=True)
+class _PoolRunStats:
+    rows_read: int
+    ids_count: int
+    errors: tuple[str, ...]
+    completed_chunks: int
+    total_chunks: int
+    timed_out: bool
 
 
 def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | None]:
@@ -39,9 +56,8 @@ def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | No
 
         sql = "SELECT * FROM public.records WHERE id = ANY(%s) ORDER BY id;"
         with psycopg.connect(dsn) as conn:
+            apply_statement_timeout(conn, timeout_ms)
             with conn.cursor(name=f"mp_worker_{work.ids[0]}") as cur:
-                if timeout_ms > 0:
-                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
                 cur.execute(sql, (work.ids,))
 
                 # Stream instead of fetchall to reduce per-worker memory
@@ -55,6 +71,23 @@ def _fetch_ids(dsn: str, timeout_ms: int, work: WorkItem) -> tuple[int, str | No
                 f"Worker ids[{len(work.ids)}] {work.ids[0]}..{work.ids[-1]}: {exc!s}",
             )
         return (0, f"Worker ids[0]: {exc!s}")
+
+
+def _accumulate_worker_outcome(
+    rows_read: int,
+    errors: list[str],
+    count: int,
+    error: str | None,
+) -> int:
+    """
+    Fold one worker outcome into totals without double-counting.
+
+    Failed workers contribute to ``errors`` only; successful workers add ``count``.
+    """
+    if error:
+        errors.append(error)
+        return rows_read
+    return rows_read + count
 
 
 class MultiprocessingStrategy(BenchmarkStrategy):
@@ -72,10 +105,13 @@ class MultiprocessingStrategy(BenchmarkStrategy):
         processes: int | None = None,
         chunk_size: int = 50_000,
         dsn_override: str | None = None,
+        worker_timeout_seconds: int = _WORKER_POOL_TIMEOUT_SECONDS,
     ) -> None:
         self.processes = processes or max(mp.cpu_count() - 1, 1)
         self.chunk_size = chunk_size
         self._dsn_override = dsn_override
+        # Explicit timeout keeps cancelled runs bounded; 0 disables the deadline.
+        self.worker_timeout_seconds = worker_timeout_seconds
 
     def _make_work_items(self, ids: Sequence[int]) -> list[WorkItem]:
         work: list[WorkItem] = []
@@ -84,6 +120,49 @@ class MultiprocessingStrategy(BenchmarkStrategy):
             if chunk_ids:
                 work.append(WorkItem(ids=chunk_ids))
         return work
+
+    def _build_result(self, stats: _PoolRunStats) -> StrategyResult:
+        notes = (
+            f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}, "
+            f"ids={stats.ids_count}, "
+            f"chunks_completed={stats.completed_chunks}/{stats.total_chunks}"
+        )
+        if stats.errors:
+            notes += f", errors={len(stats.errors)}"
+        if stats.timed_out:
+            notes += ", timed_out=true"
+
+        timeout_message = (
+            f"Workers timed out after {self.worker_timeout_seconds} seconds "
+            f"({stats.completed_chunks}/{stats.total_chunks} chunks completed)"
+        )
+        error_text = "; ".join(stats.errors[:3]) if stats.errors else None
+        if stats.timed_out and error_text is None:
+            error_text = timeout_message
+        elif stats.timed_out:
+            error_text = f"{error_text}; {timeout_message}"
+
+        incomplete = stats.total_chunks - stats.completed_chunks if stats.timed_out else 0
+        error_count = (
+            len(stats.errors) + (stats.total_chunks - stats.completed_chunks)
+            if stats.timed_out
+            else len(stats.errors)
+        )
+
+        return StrategyResult(
+            rows=stats.rows_read,
+            peak_rss_bytes=None,  # Cannot measure worker memory from main process
+            notes=notes,
+            error=error_text,
+            extra={
+                "error_count": error_count,
+                "chunks_completed": stats.completed_chunks,
+                "chunks_total": stats.total_chunks,
+                "chunks_failed": len(stats.errors),
+                "chunks_incomplete": incomplete,
+                "timed_out": stats.timed_out,
+            },
+        )
 
     def execute(self, limit: int) -> StrategyResult:
         """
@@ -96,9 +175,8 @@ class MultiprocessingStrategy(BenchmarkStrategy):
 
         timeout_ms = get_settings().db_statement_timeout_ms
         with psycopg.connect(dsn) as conn:
+            apply_statement_timeout(conn, timeout_ms)
             with conn.cursor() as cur:
-                if timeout_ms > 0:
-                    cur.execute("SET LOCAL statement_timeout = %s;", (timeout_ms,))
                 cur.execute("SELECT id FROM public.records ORDER BY id LIMIT %s;", (limit,))
                 ids = [row[0] for row in cur.fetchall()]
 
@@ -108,40 +186,59 @@ class MultiprocessingStrategy(BenchmarkStrategy):
                 peak_rss_bytes=None,
                 notes=f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}, ids=0",
                 error=None,
+                extra={
+                    "error_count": 0,
+                    "chunks_completed": 0,
+                    "chunks_total": 0,
+                    "chunks_failed": 0,
+                    "chunks_incomplete": 0,
+                    "timed_out": False,
+                },
             )
 
         work_items: Sequence[WorkItem] = self._make_work_items(ids)
 
         rows_read = 0
         errors: list[str] = []
+        completed_chunks = 0
+        timed_out = False
         worker = partial(_fetch_ids, dsn, timeout_ms)
 
         ctx = mp.get_context("spawn")
         with ctx.Pool(processes=self.processes) as pool:
+            # imap_unordered yields completed chunks so a timeout can still report
+            # partial rows/failures instead of discarding finished work.
+            iterator = pool.imap_unordered(worker, work_items)
+            deadline = (
+                time.monotonic() + self.worker_timeout_seconds
+                if self.worker_timeout_seconds > 0
+                else None
+            )
             try:
-                # Add timeout to prevent hanging (10 minutes)
-                results = pool.map_async(worker, work_items).get(timeout=600)
-
-                for count, error in results:
-                    if error:
-                        errors.append(error)
+                for _ in range(len(work_items)):
+                    if deadline is None:
+                        count, error = iterator.next()
                     else:
-                        rows_read += count
-
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise mp.TimeoutError()
+                        count, error = iterator.next(timeout=remaining)
+                    completed_chunks += 1
+                    rows_read = _accumulate_worker_outcome(rows_read, errors, count, error)
             except mp.TimeoutError:
+                # Mark timeout only; _build_result records a single timeout failure.
+                timed_out = True
                 pool.terminate()
-                pool.join()
-                errors.append("Workers timed out after 10 minutes")
 
-        notes = f"ProcessPool size={self.processes}, chunk_size={self.chunk_size}, ids={len(ids)}"
-        if errors:
-            notes += f", errors={len(errors)}"
-
-        return StrategyResult(
-            rows=rows_read,
-            peak_rss_bytes=None,  # Cannot measure worker memory from main process
-            notes=notes,
-            error="; ".join(errors[:3]) if errors else None,
+        return self._build_result(
+            _PoolRunStats(
+                rows_read=rows_read,
+                ids_count=len(ids),
+                errors=tuple(errors),
+                completed_chunks=completed_chunks,
+                total_chunks=len(work_items),
+                timed_out=timed_out,
+            )
         )
 
 

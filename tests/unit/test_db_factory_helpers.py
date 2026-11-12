@@ -86,3 +86,52 @@ def test_fetch_in_batches_handles_no_rows() -> None:
     batches = list(db_factory.fetch_in_batches(cursor, batch_size=10))
 
     assert batches == []
+
+
+TIMEOUT_ZERO = 0
+TIMEOUT_POSITIVE = 1500
+TIMEOUT_POSITIVE_STR = "1500"
+EXPECTED_SQL_PSYCOPG = "SELECT set_config('statement_timeout', %s, true)"
+EXPECTED_SQL_ASYNCPG = "SELECT set_config('statement_timeout', $1, true)"
+
+
+class _FakeTimeoutConnection:
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple[str, Any]] = []
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        self.execute_calls.append((sql, params))
+        return None
+
+
+class _FakeAsyncTimeoutConnection:
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple[str, Any]] = []
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        self.execute_calls.append((sql, args))
+        return "OK"
+
+
+def test_apply_statement_timeout_noop_when_zero() -> None:
+    conn = _FakeTimeoutConnection()
+    db_factory.apply_statement_timeout(conn, TIMEOUT_ZERO)  # type: ignore[arg-type]
+    assert conn.execute_calls == []
+
+
+def test_apply_statement_timeout_positive_issues_set_config() -> None:
+    conn = _FakeTimeoutConnection()
+    db_factory.apply_statement_timeout(conn, TIMEOUT_POSITIVE)  # type: ignore[arg-type]
+    assert conn.execute_calls == [(EXPECTED_SQL_PSYCOPG, (TIMEOUT_POSITIVE_STR,))]
+
+
+async def test_async_apply_statement_timeout_noop_when_zero() -> None:
+    conn = _FakeAsyncTimeoutConnection()
+    await db_factory.async_apply_statement_timeout(conn, TIMEOUT_ZERO)
+    assert conn.execute_calls == []
+
+
+async def test_async_apply_statement_timeout_positive_issues_set_config() -> None:
+    conn = _FakeAsyncTimeoutConnection()
+    await db_factory.async_apply_statement_timeout(conn, TIMEOUT_POSITIVE)
+    assert conn.execute_calls == [(EXPECTED_SQL_ASYNCPG, (TIMEOUT_POSITIVE_STR,))]

@@ -18,9 +18,49 @@ It compares five execution strategies under fixed CPU/RAM constraints and report
 | **Async Stream** | `asyncpg` cursor fan-out with bounded concurrency for non-blocking I/O pipelines. |
 | **Multiprocessing** | Multi-process ID-partitioned fan-out to bypass the GIL and scale row decode throughput. |
 
-## Benchmark Proof
+## Reproducible benchmark
 
-Benchmarks were executed with 3 runs per strategy (median shown), containerized resource limits, and persisted artifacts in `results/`.
+Primary command (containerized limits via Compose):
+
+```bash
+make benchmark ROWS=100000 RUNS=3
+```
+
+What it does:
+
+1. Builds the benchmark image and starts Postgres with the Compose resource caps in `docker-compose.benchmark.yml`.
+2. Seeds `ROWS` deterministic records.
+3. Runs every strategy `RUNS` times (aggregates duration, throughput, rows, CPU, and RSS statistics from `ok` runs, falling back to `partial` or all runs).
+4. Prints a status-aware results table to the console (including completed results if interrupted).
+5. Writes `results/latest.json` and a timestamped `results/run-<UTC>.json` artifact with per-run metrics, `status` (`ok` / `partial` / `failed`), and a top-level `summary` (status counts, error count, and run completion metadata).
+
+CLI exit status: `0` when all runs are `ok`, `1` when any run is `partial` or `failed`, and `130` when interrupted (Ctrl-C).
+
+Same harness without Compose (local Postgres + Poetry):
+
+```bash
+poetry run python scripts/generate_data.py --rows 10000
+poetry run python -m src.main run --strategy all --rows 10000 --runs 3
+```
+
+Detailed methodology: [docs/methodology.md](docs/methodology.md)
+
+## Measured results
+
+### Local verification (this environment)
+
+Command:
+
+```bash
+poetry run python scripts/generate_data.py --rows 10000
+poetry run python -m src.main run --strategy all --rows 10000 --runs 3
+```
+
+No locally measured figures are published in this PR; to produce current numbers run the reproducible command and read `results/latest.json` (and commit the generated `results/run-<UTC>.json` next to any figure you publish).
+
+### Historical containerized evidence (100K / 500K / 1M)
+
+The following medians come from checked-in artifacts under Compose resource limits (`benchmark` 4 CPU / 4 GB, Postgres 2 CPU / 2 GB), 3 runs per strategy. Treat them as historical machine-specific evidence, not guarantees for a fresh host:
 
 | Strategy | 100K rows/s | 500K rows/s | 1M rows/s | 1M peak RSS (MB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -30,28 +70,21 @@ Benchmarks were executed with 3 runs per strategy (median shown), containerized 
 | **Pooled Sync** | 20,450 | 20,713 | 20,576 | 1,644 |
 | **Cursor Pagination** | 21,413 | 20,929 | 19,520 | 126 |
 
-- **Throughput proof:** Multiprocessing reaches **124,378 rows/s** at 1M rows, about **5.3x** the naive baseline.
-- **Memory proof:** Async Stream holds 1M-row peak memory at **~101 MB**, about **97% lower** than naive (`~3,537 MB`).
-- **Scaling proof:** Naive throughput remains nearly flat from 100K to 1M while memory grows roughly 9x, confirming a memory-bound architecture.
+Sources: `results/run-20260207T002833Z.json`, `results/run-20260207T003446Z.json`, `results/run-20260207T003640Z.json`.
+
+Re-generate comparable numbers with:
+
+```bash
+make benchmark ROWS=100000 RUNS=3
+make benchmark ROWS=500000 RUNS=3
+make benchmark ROWS=1000000 RUNS=3
+```
 
 ### Visual Evidence
 
 ![Benchmark 100K](docs/images/benchmark-100k.png)
 ![Benchmark 500K](docs/images/benchmark-500k.png)
 ![Benchmark 1M](docs/images/benchmark-1m.png)
-
-### Metric Artifact Excerpt
-
-```json
-{
-  "limit": 1000000,
-  "strategy": "multiprocessing",
-  "throughput_rows_per_sec": { "median": 124378.11 },
-  "peak_rss_bytes": { "median": 815017984 }
-}
-```
-
-Source: `results/run-20260207T002833Z.json`
 
 ## Problem Statement
 
@@ -72,12 +105,13 @@ The project is deliberately SQL-first instead of adding NoSQL paths because the 
 
 Python/backend best practices are built into execution quality: strict static typing (`mypy` with `disallow_untyped_defs`), validated settings via Pydantic, safe process start mode (`spawn`) for cross-platform isolation, explicit timeout controls (`DB_STATEMENT_TIMEOUT_MS`), run-level failure policies (tolerant vs strict), and profiler-based peak RSS/CPU measurement with background sampling to capture transient spikes.
 
-## Reproduce Evidence
+## Known limits (engineering trade-offs)
 
-```bash
-make benchmark ROWS=100000 RUNS=3
-make benchmark ROWS=500000 RUNS=3
-make benchmark ROWS=1000000 RUNS=3
-```
-
-Detailed methodology: [docs/methodology.md](docs/methodology.md)
+- **Localhost / container network:** Host-local or Compose networking minimizes WAN latency, so results emphasize driver/decode cost over wide-area I/O.
+- **Read-only single table:** No write contention, locking, or multi-table `JOIN` cost is measured.
+- **Multiprocessing ID prefetch:** The multiprocessing path still materializes the selected ID list in the parent before chunk fan-out; async concurrent mode windows large ID sets, but multiprocessing does not yet.
+- **Naive all-or-nothing:** `naive` uses `fetchall()` and is therefore all-or-nothing; any failure yields no partial rows.
+- **Interrupted in-flight runs:** When a run is interrupted (Ctrl-C), rows read so far by the in-flight run are unknown and recorded as 0 (`failed` with `extra.interrupted=true`).
+- **Partial failure semantics:** Worker/batch errors are counted into `status` + `summary.error_count` and fail the process exit code, but tolerant mode continues remaining strategies/runs by design.
+- **Host variance:** Throughput and RSS depend on CPU count, memory pressure, and Postgres tuning; compare runs only under the same command and resource envelope.
+- **Statistical depth:** Default publishable comparisons should use several runs (`RUNS=3` minimum; more is better) plus optional `--warmup`.
