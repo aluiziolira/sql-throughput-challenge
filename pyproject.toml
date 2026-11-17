@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Benchmarking suite comparing SQL read strategies (sync, async, pooling, multiprocessing) against PostgreSQL."
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Aluizio Lira", email = "alumlira@gmail.com" }]
+authors = [{ name = "Aluizio Lira", email = "aluizio@aluiziolira.dev" }]
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
